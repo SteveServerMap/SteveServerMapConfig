@@ -761,7 +761,7 @@ async function saveToSite() {
     let config = model.toConfigJson(state.draft);
     // 站点 config.json 首行的 $schema 只用于编辑器补全；model 会剥掉未知字段，这里补回去
     if (state.schemaRef) config = { $schema: state.schemaRef, ...config };
-    const res = await api('/api/save', { method: 'POST', body: { config } });
+    const res = await saveWithGuard(config);
     state.dirty = false;
     state.configExists = true;
     state.lastSaved = res.savedAt;
@@ -773,11 +773,44 @@ async function saveToSite() {
     document.title = '地图配置工具';
     return { ok: true, ...res, config };
   } catch (err) {
+    if (err.cancelled) {
+      setStatus('已取消保存：这次保存会大量删除路径点', 'warn');
+      toast('已取消保存。想回到站点真实配置请点「读取站点配置」。', 'warn', 5000);
+      return { ok: false, error: err.message, cancelled: true };
+    }
     setStatus(`保存失败：${err.message}`, 'error');
     toast(`保存失败：${err.message}`, 'error', 5000);
-    return { ok: false, error: err.message };
+    return { ok: false, error: err.message, payload: err.payload };
   } finally {
     state.saving = false;
+  }
+}
+
+/**
+ * 保存到站点。服务端有「大量删点」防呆：如果一次保存会删掉超过 20%（且 ≥3 个）路径点，
+ * 会返回 409 CONFIRM_REQUIRED，这里弹确认框，用户确认后带 confirm:true 重试。
+ */
+async function saveWithGuard(config) {
+  try {
+    return await api('/api/save', { method: 'POST', body: { config } });
+  } catch (err) {
+    const payload = err.payload;
+    if (!payload || payload.code !== 'CONFIRM_REQUIRED') throw err;
+    const before = payload.before || { total: 0, byDim: {} };
+    const after = payload.after || { total: 0, byDim: {} };
+    const lines = Object.keys(after.byDim || {})
+      .filter((id) => (before.byDim[id] || 0) !== (after.byDim[id] || 0))
+      .map((id) => `  ${id}: ${before.byDim[id] || 0} → ${after.byDim[id] || 0}`);
+    const ok = window.confirm(
+      `这次保存会让路径点总数从 ${before.total} 变成 ${after.total}：\n\n${lines.join('\n')}\n\n` +
+        '如果这不是你想要的，点「取消」，然后点「读取站点配置」重新载入。\n确定要保存吗？',
+    );
+    if (!ok) {
+      const cancelErr = new Error('已取消保存（检测到会大量删除路径点）');
+      cancelErr.cancelled = true;
+      throw cancelErr;
+    }
+    return api('/api/save', { method: 'POST', body: { config, confirm: true } });
   }
 }
 
@@ -1422,7 +1455,10 @@ async function api(path, { method = 'GET', body } = {}) {
     throw new Error(`${method} ${path} 返回了非 JSON 内容（HTTP ${res.status}）：${text.slice(0, 120)}`);
   }
   if (!res.ok || (data && data.ok === false)) {
-    throw new Error((data && data.error) || `${method} ${path} 失败（HTTP ${res.status}）`);
+    const error = new Error((data && data.error) || `${method} ${path} 失败（HTTP ${res.status}）`);
+    error.status = res.status;
+    error.payload = data; // 让调用方拿到结构化信息（例如 CONFIRM_REQUIRED 的前后点数）
+    throw error;
   }
   return data;
 }
@@ -1589,6 +1625,8 @@ function calibrateFromPoints(a, b) {
 }
 
 export { state, api, saveToSite as save };
+
+
 
 
 

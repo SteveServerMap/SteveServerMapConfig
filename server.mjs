@@ -310,6 +310,38 @@ async function listSiteImages() {
   return out.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
 }
 
+/** 统计文件里各维度的路径点数量（文件不存在返回 0） */
+async function countWaypointsOfFile(filePath) {
+  try {
+    const raw = await fsp.readFile(filePath, 'utf8');
+    return countWaypointsOfConfig(JSON.parse(raw.replace(/^\uFEFF/, '')));
+  } catch {
+    return { total: 0, byDim: {} };
+  }
+}
+
+function countWaypointsOfConfig(config) {
+  const byDim = {};
+  let total = 0;
+  for (const dim of (config && config.dimensions) || []) {
+    const n = Array.isArray(dim.waypoints) ? dim.waypoints.length : 0;
+    byDim[String(dim.id)] = n;
+    total += n;
+  }
+  return { total, byDim };
+}
+
+/** 保存审计日志：谁知道哪个实例往哪个目录写了什么（排查误覆盖用） */
+async function appendSaveLog(entry) {
+  try {
+    await fsp.mkdir(DATA_DIR, { recursive: true });
+    const line = JSON.stringify({ at: new Date().toISOString(), pid: process.pid, port: PORT, ...entry }) + '\n';
+    await fsp.appendFile(path.join(DATA_DIR, 'save.log'), line, 'utf8');
+  } catch (err) {
+    console.warn('[server] 写 save.log 失败：', err.message);
+  }
+}
+
 async function readDraft() {
   try {
     const raw = await fsp.readFile(DRAFT_FILE, 'utf8');
@@ -435,6 +467,24 @@ async function handleApi(req, res, url) {
       throw new HttpError(400, 'config 必须是包含 dimensions 数组的对象');
     }
     const configPath = path.join(SITE_DIR, 'config.json');
+
+    // ---- 写前防呆：如果这次保存会「大量减少」路径点，必须显式确认 ----
+    // （工具是本地单用户，但误点一次「保存到站点」不该把几十个路径点冲掉）
+    if (!body.confirm) {
+      const before = await countWaypointsOfFile(configPath);
+      const after = countWaypointsOfConfig(config);
+      const removed = before.total - after.total;
+      if (before.total > 0 && removed >= 3 && removed / before.total > 0.2) {
+        await appendSaveLog({ event: 'refused', before: before.total, after: after.total, siteDir: SITE_DIR });
+        return sendJson(res, 409, {
+          ok: false,
+          code: 'CONFIRM_REQUIRED',
+          error: `这次保存会删除 ${removed} 个路径点（${before.total} → ${after.total}），已拦住`,
+          before,
+          after,
+        });
+      }
+    }
     await fsp.mkdir(SITE_DIR, { recursive: true });
     let backup = null;
     if (fs.existsSync(configPath)) {
@@ -443,6 +493,13 @@ async function handleApi(req, res, url) {
     }
     const text = JSON.stringify(config, null, 2) + '\n';
     await fsp.writeFile(configPath, text, 'utf8');
+    await appendSaveLog({
+      event: 'saved',
+      siteDir: SITE_DIR,
+      counts: countWaypointsOfConfig(config),
+      bytes: Buffer.byteLength(text),
+      confirmed: body.confirm === true,
+    });
     log(`已写入 ${configPath}（${Buffer.byteLength(text)} 字节）${backup ? `，备份 ${path.basename(backup)}` : ''}`);
     return sendJson(res, 200, {
       ok: true,
@@ -542,3 +599,4 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     setTimeout(() => process.exit(0), 1500).unref();
   });
 }
+

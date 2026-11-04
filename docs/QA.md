@@ -20,7 +20,7 @@ node tests/e2e.mjs
 ```
 
 - **退出码 0** = 全部检查通过；**退出码 1** = 有失败项或基础设施起不来。
-- 全过程约 **17 秒**（本次实测 16.9 s）。
+- 全过程约 **17 秒**（本次实测 17.6 s）。
 - 结束时保证：工具服务器已 `taskkill /T /F`、浏览器进程已退出、`%TEMP%` 下的站点副本与草稿目录已删除
   （用 `--keep` 时才保留并打印路径）。
 
@@ -215,14 +215,14 @@ node tests/e2e.mjs
 
 | 时间（本地） | 环境 | 结果 | 耗时 |
 | --- | --- | --- | --- |
-| 2026-11-05 03:59 | Node v24.18.0 · Edge 155 (headless) · Windows | **16 通过 / 0 失败 / 0 跳过 / 0 警告**（退出码 0） | 16.9 s |
+| 2026-11-05 04:02 | Node v24.18.0 · Edge 155 (headless) · Windows | **16 通过 / 0 失败 / 0 跳过 / 0 警告**（退出码 0） | 17.6 s |
 
 逐项（与运行时输出一致）：
 
 ```
 ✓ x3-schema-selftest      站点配置 0 错误；坏配置被拒 3 条
 ✓ c1-health               200 · version=1.0.0 · siteDir=临时副本 · dataDir=--data 指定的临时目录
-✓ c2-page                 重新导航后 457 ms 内完成首屏；树渲染 1 ms；console error / 异常 / HTTP≥400：0
+✓ c2-page                 重新导航后 496 ms 内完成首屏；树渲染 141 ms；console error / 异常 / HTTP≥400：0
 ✓ c0-visible              opacity=1、is-loaded ✓、518×740px 显示中；mean=47.3 / litRatio=0.233（阈值 8 / 0.05）
                           #canvas-info="主世界 · 主世界.png · 3584×5120px"；enhance=1、画布标记 10 个
 ✓ c0b-enhance             data-enhance 1 → 0 → 1；aria-pressed true→false；filter 变化 ✓；localStorage=0
@@ -232,7 +232,7 @@ node tests/e2e.mjs
                           落盘 xMin=-1791.249 xMax=1791.192 zMin=-2560.241 zMax=2560.509，最大误差 0.808 方块
 ✓ c5a-new-waypoint        新点 X=-29 Z=-44（点击处 -28.966 / -44.032），表单已显示
 ✓ c5b-save-verify         主世界 10 → 11 个点；JSON.parse ✓；schema ✓；下界/末地未受影响
-✓ x2-backup               最新备份 6474 字节：JSON.parse ✓、保存前 10 个点；共 2 份备份
+✓ x2-backup               最新备份 config.json.bak-20261105-040155（6474 字节）：JSON.parse ✓、保存前 10 个点；共 2 份备份
 ✓ c5c-place               mode='place' + badge 可见 → 落点误差 0.668 方块 ≤1.5 → mode 回 'select'
 ✓ c6-save-blocked         注入「维度 id 为空」→ 保存被阻止（6783 字节未变）→ 提示「有 1 个错误，未保存」
 ✓ c7-preview              iframe 标记 12 个 = 草稿 12 个（站点已保存 11 个）
