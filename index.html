@@ -44,6 +44,14 @@
       </div>
       <div class="toolbar-sep" aria-hidden="true"></div>
       <div class="toolbar-group">
+        <button id="btn-create-on-map" class="btn ghost" type="button"
+                title="在图上新建：点地图上的位置直接新建一个路径点">
+          <svg class="icon"><use href="#i-plus-circle"></use></svg><span>在图上新建</span>
+        </button>
+        <button id="btn-pick-position" class="btn ghost" type="button" disabled
+                title="在图上取点：把选中的路径点移到地图上点击的位置（先选中一个路径点）">
+          <svg class="icon"><use href="#i-target"></use></svg><span>在图上取点</span>
+        </button>
         <button id="btn-enhance" class="btn ghost" type="button" aria-pressed="false"
                 title="提亮基底图（很多离线地图渲染很暗，纯黑的是未探索区域）">
           <svg class="icon"><use href="#i-sun"></use></svg><span>提亮</span>
@@ -255,5 +263,7 @@
 <script type="module" src="assets/js/app.js"></script>
 </body>
 </html>
+
+
 
 

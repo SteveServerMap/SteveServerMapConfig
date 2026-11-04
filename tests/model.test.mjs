@@ -292,8 +292,11 @@ test('normalizeDraft：站点真实 config.json 往返语义等价，且导出�
 
   // 工具字段必须剥掉
   assert.equal(JSON.stringify(config).includes('imageMeta'), false);
-  // 主世界 10 个、下界 2 个、末地 2 个
-  assert.deepEqual(config.dimensions.map((dimension) => dimension.waypoints.length), [10, 2, 2]);
+  // 路径点数量必须与站点原文件一致（不要写死具体数字：站点配置会随使用变化）
+  assert.deepEqual(
+    config.dimensions.map((dimension) => dimension.waypoints.length),
+    raw.dimensions.map((dimension) => (Array.isArray(dimension.waypoints) ? dimension.waypoints.length : 0)),
+  );
 });
 
 test('normalizeDraft：导出 → 再规范化 → 再导出，结果完全稳定（幂等）', (t) => {

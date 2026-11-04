@@ -912,6 +912,28 @@ async function findInputByValue(page, value) {
   }, value);
 }
 
+/** 画布 / 交互状态：模式、待落位目标、选中项、「在图上取点」按钮状态 */
+async function readCanvasMode(page) {
+  return page.evalFn(() => {
+    const tool = window.__tool;
+    const canvas = tool && tool.canvas;
+    const st = tool && typeof tool.state === 'function' ? tool.state() : null;
+    const badge = document.getElementById('mode-badge');
+    const pick = document.getElementById('btn-pick-position');
+    return {
+      mode: canvas && typeof canvas.getMode === 'function' ? canvas.getMode() : document.body.dataset.mode || null,
+      placeFor: st ? st.placeFor ?? null : null,
+      selection: st ? st.selection : null,
+      haveProjection: Boolean(st && st.projection),
+      badgeVisible: Boolean(badge && !badge.hidden),
+      badgeText: badge ? (badge.textContent || '').trim().slice(0, 70) : '',
+      pickDisabled: pick ? pick.disabled : null,
+      pickText: pick ? (pick.textContent || '').trim().slice(0, 20) : null,
+      status: (document.getElementById('status')?.textContent || '').trim().slice(0, 90),
+    };
+  });
+}
+
 /* ------------------------------ 画布坐标 ------------------------------ */
 
 /** 画布上可见区域内的某个相对位置 → 屏幕坐标 + 对应的图片像素 */
@@ -2009,7 +2031,8 @@ async function checkNewWaypoint(ctx) {
   assert(newWp, '草稿里没有出现新的路径点 id');
   ctx.newWaypointId = String(newWp.id);
 
-  // 画布交互：先点画布（place 模式），不生效就把标记拖过去（两者都是真实交互）
+  // 画布交互（新语义）：新建后**不会**自动进入 place；
+  // 先点顶栏「在图上取点」(#btn-pick-position) → place 模式 → 点地图落位。
   const cal = dim.calibration || {};
   assert(
     Number.isFinite(num(cal.xMin)) && Number.isFinite(num(cal.zMin)),
@@ -2024,10 +2047,41 @@ async function checkNewWaypoint(ctx) {
   };
   const near = (wp) => wp && Math.abs(num(wp.x) - wantWorld.x) <= 2 && Math.abs(num(wp.z) - wantWorld.z) <= 2;
 
+  const afterNew = await readCanvasMode(page);
+  assert(
+    afterNew.mode === 'select' && afterNew.placeFor === null,
+    `新建路径点后画布模式 实际 mode=${JSON.stringify(afterNew.mode)} placeFor=${JSON.stringify(afterNew.placeFor)} vs 期望 'select'/null（新语义：点路径点只选中，不进入待落位）`,
+  );
+
+  let armed = afterNew;
+  let how = null;
+  if (afterNew.mode === 'place') {
+    // 兼容：万一又改回「新建即 place」
+    how = '画布点击（新建后自动 place）';
+  } else {
+    const pickBtn = await findClickable(page, { selectors: ['#btn-pick-position'] });
+    assert(pickBtn, '找不到「在图上取点」按钮 #btn-pick-position，无法把新点放到地图上');
+    const pickState = await page.evalFn(() => {
+      const btn = document.getElementById('btn-pick-position');
+      return { disabled: btn ? btn.disabled : null, text: btn ? btn.textContent.trim().slice(0, 20) : null };
+    });
+    assert(
+      pickState.disabled === false,
+      `#btn-pick-position 实际 disabled=${JSON.stringify(pickState.disabled)} vs 期望 false（新建后新点应已自动选中）`,
+    );
+    await page.click(pickBtn.cx, pickBtn.cy);
+    await page.settle(180);
+    armed = await readCanvasMode(page);
+    assert(
+      armed.mode === 'place' && armed.placeFor === ctx.newWaypointId,
+      `点「${pickState.text || '#btn-pick-position'}」后 实际 mode=${JSON.stringify(armed.mode)} placeFor=${JSON.stringify(armed.placeFor)} vs 期望 'place'/${ctx.newWaypointId}`,
+    );
+    how = '点「在图上取点」→ place → 画布点击';
+  }
+
   await page.click(target.cx, target.cy);
   await page.settle(260);
   let moved = await readWp();
-  let how = '画布点击（place 模式）';
 
   if (!near(moved)) {
     const dragged = await dragMarker(ctx, ctx.newWaypointId, target);
@@ -2045,9 +2099,15 @@ async function checkNewWaypoint(ctx) {
       moved = await readWp();
       how = `表单 patch（画布点击与标记拖拽都没改坐标：${dragged.reason || '未知'}）`;
     } else {
-      how = `标记拖拽（画布点击没有把新点放到点击处，place 模式未接入 app）`;
+      how = `标记拖拽（点「在图上取点」+ 点画布没有把新点放到点击处，退回拖拽）`;
     }
   }
+
+  const afterPlace = await readCanvasMode(page);
+  assert(
+    afterPlace.mode === 'select' && afterPlace.placeFor === null,
+    `落位后画布模式 实际 mode=${JSON.stringify(afterPlace.mode)} placeFor=${JSON.stringify(afterPlace.placeFor)} vs 期望 'select'/null`,
+  );
 
   moved = await readWp();
   assert(moved, `草稿里找不到新路径点 ${ctx.newWaypointId}`);
@@ -2095,8 +2155,12 @@ async function dragMarker(ctx, markerId, target) {
 /* ------------------------------ §7.5c 放置模式（place） ------------------------------ */
 
 /**
- * 新增路径点后应进入 place 模式：#mode-badge 可见、canvas.getMode() === 'place'；
- * 在地图上点一下 → 新点落到该处（≤1.5 方块）→ 模式自动回到 select、badge 隐藏。
+ * 交互语义（用户反馈后调整，本用例是它的回归）：
+ *   ① 点路径点（树/标记）只选中，**不进入**「待落位」：canvas.getMode() === 'select'、state.placeFor === null；
+ *   ② 新建路径点也不再自动 place（落当前视图中心），要显式点顶栏「在图上取点」(#btn-pick-position)；
+ *   ③ 点地图落位后回 'select'、badge 隐藏、placeFor 清空；
+ *   ④ **点画布空白处只取消选中，绝不移动已选中的点**（用户被「悄悄挪走」的那个 bug 的回归点）；
+ *   ⑤ 切换选中会自动取消 place。
  * 结束后撤销回原状（不影响后面的用例）。
  */
 async function checkPlaceMode(ctx) {
@@ -2107,34 +2171,15 @@ async function checkPlaceMode(ctx) {
 
   const beforeCount = waypointsOf((await readCurrentConfig(ctx)).config).length;
   const beforeIds = new Set(waypointsOf((await readCurrentConfig(ctx)).config).map((w) => String(w.id)));
+  const imageSize = (await domFacts(page)).imageNatural;
 
+  // ---------- ① 新建路径点：应停在 select，且「在图上取点」可用 ----------
   const howNew = await clickAction(ctx, {
     selectors: ['#btn-new-waypoint', '[data-action="new-waypoint"]'],
     texts: ['新增路径点', '新建路径点', '添加路径点'],
     toolAction: 'new-waypoint',
   });
   await page.settle(200);
-
-  const modeAfterNew = await page.evalFn(() => {
-    const tool = window.__tool;
-    const canvas = tool && tool.canvas;
-    const badge = document.getElementById('mode-badge');
-    return {
-      mode: canvas && typeof canvas.getMode === 'function' ? canvas.getMode() : document.body.dataset.mode || null,
-      badgeVisible: Boolean(badge && !badge.hidden),
-      badgeText: badge ? (badge.textContent || '').trim().slice(0, 60) : '',
-      status: (document.getElementById('status')?.textContent || '').trim().slice(0, 80),
-    };
-  });
-  assert(
-    modeAfterNew.mode === 'place',
-    `点「${howNew}」后画布模式 实际 ${JSON.stringify(modeAfterNew.mode)} vs 期望 'place'（状态栏="${truncate(modeAfterNew.status, 50)}"）`,
-  );
-  assert(
-    modeAfterNew.badgeVisible,
-    `#mode-badge 实际隐藏 vs 期望可见（放置提示）；状态栏="${truncate(modeAfterNew.status, 60)}"`,
-  );
-
   const grown = await waitForConfig(ctx, (config) => waypointsOf(config).length === beforeCount + 1, {
     timeout: 4000,
     label: '放置用例：草稿里多出一个路径点',
@@ -2144,11 +2189,40 @@ async function checkPlaceMode(ctx) {
   assert(newWp, '放置用例：草稿里没有出现新的路径点 id');
   const newId = String(newWp.id);
 
-  const imageSize = (await domFacts(page)).imageNatural;
-  const cal = dim.calibration || {};
-  const target = await canvasPointAt(page, 0.58, 0.46);
-  const want = worldFromPixel(cal, imageSize, target.px, target.py);
+  const afterNew = await readCanvasMode(page);
+  assert(
+    afterNew.mode === 'select',
+    `新建路径点后画布模式 实际 ${JSON.stringify(afterNew.mode)} vs 期望 'select'（新语义：不再自动进入待落位，状态栏="${truncate(afterNew.status, 40)}"）`,
+  );
+  assert(
+    afterNew.placeFor === null,
+    `新建路径点后 state.placeFor 实际 ${JSON.stringify(afterNew.placeFor)} vs 期望 null`,
+  );
+  assert(afterNew.badgeVisible === false, '新建路径点后 #mode-badge 实际可见 vs 期望隐藏（没有进入放置模式）');
+  assert(
+    afterNew.pickDisabled === false,
+    `新建路径点后 #btn-pick-position 实际 disabled=${JSON.stringify(afterNew.pickDisabled)} vs 期望 false（新点应已自动选中、投影可用）`,
+  );
 
+  // ---------- ② 点「在图上取点」→ place → 点地图落位 ----------
+  const pickBtn = await findClickable(page, { selectors: ['#btn-pick-position'] });
+  assert(pickBtn, '找不到「在图上取点」按钮 #btn-pick-position');
+  await page.click(pickBtn.cx, pickBtn.cy);
+  await page.settle(180);
+  const armed = await readCanvasMode(page);
+  assert(
+    armed.mode === 'place',
+    `点「在图上取点」后画布模式 实际 ${JSON.stringify(armed.mode)} vs 期望 'place'`,
+  );
+  assert(
+    armed.placeFor === newId,
+    `点「在图上取点」后 state.placeFor 实际 ${JSON.stringify(armed.placeFor)} vs 期望 ${JSON.stringify(newId)}`,
+  );
+  assert(armed.badgeVisible === true, '放置模式下 #mode-badge 实际隐藏 vs 期望可见（应提示「放置「…」：点击地图设置坐标」）');
+
+  const cal = dim.calibration || {};
+  const target = await canvasPointAt(page, 0.72, 0.28);
+  const want = worldFromPixel(cal, imageSize, target.px, target.py);
   await page.click(target.cx, target.cy);
   await page.settle(260);
 
@@ -2168,22 +2242,62 @@ async function checkPlaceMode(ctx) {
     `放置落点误差过大：实际 X=${fmt(wp.x)} Z=${fmt(wp.z)} vs 期望 X=${fmt(want.x)} Z=${fmt(want.z)}（误差 X ${fmt(dx)} / Z ${fmt(dz)} > 1.5 方块）`,
   );
 
-  const modeAfterPlace = await page.evalFn(() => {
-    const tool = window.__tool;
-    const canvas = tool && tool.canvas;
-    const badge = document.getElementById('mode-badge');
-    return {
-      mode: canvas && typeof canvas.getMode === 'function' ? canvas.getMode() : document.body.dataset.mode || null,
-      badgeVisible: Boolean(badge && !badge.hidden),
-    };
-  });
+  const afterPlace = await readCanvasMode(page);
   assert(
-    modeAfterPlace.mode === 'select',
-    `放置完成后画布模式 实际 ${JSON.stringify(modeAfterPlace.mode)} vs 期望 'select'`,
+    afterPlace.mode === 'select',
+    `落位后画布模式 实际 ${JSON.stringify(afterPlace.mode)} vs 期望 'select'`,
   );
-  assert(modeAfterPlace.badgeVisible === false, '#mode-badge 放置完成后本应隐藏，实际仍可见');
+  assert(afterPlace.placeFor === null, `落位后 state.placeFor 实际 ${JSON.stringify(afterPlace.placeFor)} vs 期望 null`);
+  assert(afterPlace.badgeVisible === false, '落位后 #mode-badge 实际可见 vs 期望隐藏');
 
-  // 复原：撤销掉「放置 + 新增」这两步
+  // ---------- ③ 核心回归：点画布空白处不会移动已选中的点 ----------
+  if (String(afterPlace.selection?.waypointId ?? '') !== newId) {
+    await selectWaypoint(ctx, { id: newId, name: String(wp.name) });
+  }
+  const beforeBlank = waypointsOf((await readCurrentConfig(ctx)).config).find((w) => String(w.id) === newId);
+  const blank = await canvasPointAt(page, 0.12, 0.86);
+  await page.click(blank.cx, blank.cy);
+  await page.settle(260);
+  const afterBlankMode = await readCanvasMode(page);
+  const afterBlankWp = waypointsOf((await readCurrentConfig(ctx)).config).find((w) => String(w.id) === newId);
+  assert(
+    afterBlankWp && num(afterBlankWp.x) === num(beforeBlank.x) && num(afterBlankWp.z) === num(beforeBlank.z),
+    `点画布空白处把已选中的路径点挪走了：X ${fmt(beforeBlank.x)} → ${fmt(afterBlankWp?.x)}、Z ${fmt(beforeBlank.z)} → ${fmt(afterBlankWp?.z)}（期望不变）`,
+  );
+  assert(
+    afterBlankMode.mode === 'select' && afterBlankMode.placeFor === null,
+    `点空白后画布状态 实际 mode=${JSON.stringify(afterBlankMode.mode)} placeFor=${JSON.stringify(afterBlankMode.placeFor)} vs 期望 'select'/null`,
+  );
+  assert(
+    (afterBlankMode.selection?.waypointId ?? null) === null,
+    `点空白后选中项 实际 ${JSON.stringify(afterBlankMode.selection?.waypointId)} vs 期望 null（空白点击=取消选中）`,
+  );
+  assert(
+    afterBlankMode.pickDisabled === true,
+    `取消选中后 #btn-pick-position 实际 disabled=${JSON.stringify(afterBlankMode.pickDisabled)} vs 期望 true（没有选中项时不可用）`,
+  );
+
+  // ---------- ④ 切换选中会自动取消 place ----------
+  const other = ctx.siteFirstWaypoint;
+  assert(other?.id, '站点 config.json 里没有其它路径点，无法测「切换选中取消放置」');
+  await selectWaypoint(ctx, { id: other.id, name: other.name });
+  const pickBtn2 = await findClickable(page, { selectors: ['#btn-pick-position'] });
+  assert(pickBtn2, '找不到「在图上取点」按钮 #btn-pick-position（第二次）');
+  await page.click(pickBtn2.cx, pickBtn2.cy);
+  await page.settle(180);
+  const armedOther = await readCanvasMode(page);
+  assert(
+    armedOther.mode === 'place' && armedOther.placeFor === String(other.id),
+    `为另一个点进入放置后 实际 mode=${JSON.stringify(armedOther.mode)} placeFor=${JSON.stringify(armedOther.placeFor)} vs 期望 'place'/${JSON.stringify(String(other.id))}`,
+  );
+  await selectWaypoint(ctx, { id: newId, name: String(wp.name) });
+  const afterSwitch = await readCanvasMode(page);
+  assert(
+    afterSwitch.mode === 'select' && afterSwitch.placeFor === null,
+    `切换选中后应自动取消放置：实际 mode=${JSON.stringify(afterSwitch.mode)} placeFor=${JSON.stringify(afterSwitch.placeFor)} vs 期望 'select'/null`,
+  );
+
+  // ---------- 复原：撤销掉「放置 + 新增」这两步 ----------
   let undos = 0;
   for (; undos < 4; undos += 1) {
     await pressCtrlZ(page);
@@ -2200,7 +2314,11 @@ async function checkPlaceMode(ctx) {
     ctx.report.warn('放置用例没能撤销干净', `当前 ${finalCount} 个点，期望 ${beforeCount}（后续用例已按动态计数处理）`);
   }
 
-  return `${howNew} → mode='place'、badge="${truncate(modeAfterNew.badgeText, 30)}"；点击地图后 X=${fmt(wp.x)} Z=${fmt(wp.z)}（期望 ${fmt(want.x)} / ${fmt(want.z)}，误差 ${fmt(Math.max(dx, dz))} 方块 ≤1.5）；随后 mode 回到 'select'、badge 隐藏（撤销 ${undos + 1} 次复原）`;
+  return (
+    `新建后 mode='select'/placeFor=null；点「在图上取点」→ mode='place'、badge="${truncate(armed.badgeText, 26)}"；` +
+    `点地图落位 X=${fmt(wp.x)} Z=${fmt(wp.z)}（期望 ${fmt(want.x)} / ${fmt(want.z)}，误差 ${fmt(Math.max(dx, dz))} 方块 ≤1.5）；` +
+    `随后回 'select'；点空白不移动该点 ✓ 且取消选中、取点按钮 disabled ✓；切换选中自动取消放置 ✓（撤销 ${undos + 1} 次复原）`
+  );
 }
 
 /* ------------------------------ §7.5b 保存并校验站点 config.json ------------------------------ */
@@ -2935,6 +3053,10 @@ async function preflight(ctx) {
   const siteConfig = JSON.parse((await fsp.readFile(realConfigPath, 'utf8')).replace(/^\uFEFF/, ''));
   const over = dimensionOf(siteConfig);
   ctx.siteCount = (over?.waypoints || []).length;
+  // 每个维度的路径点数都从站点副本的 config.json 动态读，绝不写死（用户随时会改站点配置）
+  ctx.dimensionCounts = Object.fromEntries(
+    (siteConfig.dimensions || []).map((dim) => [String(dim.id), (dim.waypoints || []).length]),
+  );
   ctx.siteWaypointNames = (over?.waypoints || []).map((w) => String(w.name || ''));
   ctx.siteGroupNames = (over?.groups || []).map((g) => String(g.name || ''));
   ctx.siteFirstWaypoint = (over?.waypoints || [])[0] ? { id: String(over.waypoints[0].id), name: String(over.waypoints[0].name) } : null;

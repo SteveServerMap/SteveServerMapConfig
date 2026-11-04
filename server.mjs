@@ -48,6 +48,10 @@ const HOST = String(args.host || process.env.SSM_HOST || '127.0.0.1');
 const SITE_DIR = path.resolve(
   String(args.site || process.env.SSM_SITE || path.join(TOOL_DIR, '..', 'SteveServerMap.github.io')),
 );
+/** 站点仓库里的备份目录（放在子目录里，配合 .gitignore 避免误提交） */
+const SITE_BACKUP_DIR = path.join(SITE_DIR, ".backups");
+const KEEP_BACKUPS = 10;
+
 const DATA_DIR = path.resolve(
   String(args.data || process.env.SSM_DATA || path.join(TOOL_DIR, '.data')),
 );
@@ -310,6 +314,30 @@ async function listSiteImages() {
   return out.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
 }
 
+/**
+ * 把 filePath 复制到站点仓库的 .backups/ 下，返回相对站点目录的备份路径；文件不存在返回 null。
+ * 只保留最近 KEEP_BACKUPS 份，避免无限膨胀。
+ */
+async function backupInto(filePath, kind) {
+  if (!fs.existsSync(filePath)) return null;
+  await fsp.mkdir(SITE_BACKUP_DIR, { recursive: true });
+  const base = path.basename(filePath);
+  const target = path.join(SITE_BACKUP_DIR, base + ".bak-" + stamp());
+  await fsp.copyFile(filePath, target);
+  try {
+    const entries = (await fsp.readdir(SITE_BACKUP_DIR))
+      .filter((name) => name.startsWith(base + ".bak-"))
+      .sort();
+    for (const name of entries.slice(0, Math.max(0, entries.length - KEEP_BACKUPS))) {
+      await fsp.rm(path.join(SITE_BACKUP_DIR, name), { force: true });
+    }
+  } catch (err) {
+    console.warn("[server] 清理旧备份失败：", err.message);
+  }
+  if (kind) log("已备份 " + base + " → .backups/" + path.basename(target) + "（" + kind + "）");
+  return ".backups/" + path.basename(target);
+}
+
 /** 统计文件里各维度的路径点数量（文件不存在返回 0） */
 async function countWaypointsOfFile(filePath) {
   try {
@@ -443,18 +471,14 @@ async function handleApi(req, res, url) {
     const size = imageSize(buf);
 
     await fsp.mkdir(SITE_DIR, { recursive: true });
-    let backup = null;
-    if (fs.existsSync(full)) {
-      backup = `${full}.bak-${stamp()}`;
-      await fsp.copyFile(full, backup);
-    }
+    const backup = await backupInto(full, "import-image");
     await fsp.writeFile(full, buf);
     log(`导入图片 ${path.basename(full)}（${buf.length} 字节）${backup ? `，原文件备份为 ${path.basename(backup)}` : ''}`);
     return sendJson(res, 200, {
       ok: true,
       name: path.basename(full),
       bytes: buf.length,
-      backup: backup ? path.basename(backup) : null,
+      backup,
       width: size ? size.width : null,
       height: size ? size.height : null,
     });
@@ -486,11 +510,7 @@ async function handleApi(req, res, url) {
       }
     }
     await fsp.mkdir(SITE_DIR, { recursive: true });
-    let backup = null;
-    if (fs.existsSync(configPath)) {
-      backup = `${configPath}.bak-${stamp()}`;
-      await fsp.copyFile(configPath, backup);
-    }
+    const backup = await backupInto(configPath, "config.json");
     const text = JSON.stringify(config, null, 2) + '\n';
     await fsp.writeFile(configPath, text, 'utf8');
     await appendSaveLog({
@@ -500,11 +520,11 @@ async function handleApi(req, res, url) {
       bytes: Buffer.byteLength(text),
       confirmed: body.confirm === true,
     });
-    log(`已写入 ${configPath}（${Buffer.byteLength(text)} 字节）${backup ? `，备份 ${path.basename(backup)}` : ''}`);
+    log(`已写入 ${configPath}（${Buffer.byteLength(text)} 字节）${backup ? `，备份 ${backup}` : ''}`);
     return sendJson(res, 200, {
       ok: true,
       path: configPath,
-      backup: backup ? path.basename(backup) : null,
+      backup,
       bytes: Buffer.byteLength(text),
       savedAt: new Date().toISOString(),
     });

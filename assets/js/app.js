@@ -57,6 +57,8 @@ const state = {
 
   /** 放置模式：placeFor = 正在等待点击落位的路径点 id */
   placeFor: null,
+  /** 在图上新建：true 时下一次点地图会新建路径点 */
+  createArmed: false,
 
   /** 站点 config.json 里原有的 $schema 提示，保存时原样带回 */
   schemaRef: null,
@@ -220,6 +222,15 @@ function initCanvas() {
     },
     onEmptyClick: ({ world }) => {
       if (state.pendingPick) return;
+      if (state.createArmed) {
+        const created = createWaypointAt(world, { prefix: '新路径点' });
+        disarmCreate();
+        if (created) {
+          toast(`已新建「${created.name}」（X ${created.x} · Z ${created.z}）`, 'ok', 3000);
+          setStatus('已在地图上新建路径点，右侧可改名称/图标/分组', 'ok');
+        }
+        return;
+      }
       if (state.placeFor) {
         placeAt(world);
         return;
@@ -291,6 +302,7 @@ async function activateDimension(dimensionId) {
   } else {
     hideCanvasEmpty();
   }
+  syncAppProjection();
   refreshCanvas();
   refreshEditor();
   runValidation();
@@ -341,11 +353,37 @@ function ensureCalibration(dim, size) {
   };
 }
 
+/**
+ * 同步 app 侧的投影状态。
+ * 画布内部也会算投影，但「坐标读数 / 列表定位 / 在图上取点」这些功能读的是 state.projection，
+ * 之前切换维度后没有重新赋值（一直是 null），导致它们静默失效。
+ */
+function syncAppProjection() {
+  const dim = currentDimension();
+  const meta = (dim && dim.imageMeta) || {};
+  state.imageSize = meta.width > 0 && meta.height > 0 ? { width: meta.width, height: meta.height } : null;
+  const cal = (dim && dim.calibration) || null;
+  state.calibration = cal
+    ? {
+        xMin: Number(cal.xMin),
+        xMax: Number(cal.xMax),
+        zMin: Number(cal.zMin),
+        zMax: Number(cal.zMax),
+        flipZ: cal.flipZ === true,
+        calibrated: cal.calibrated === true,
+        note: cal.note || '',
+      }
+    : null;
+  state.projection = projectionFor(dim);
+  updatePickPositionButton();
+  return state.projection;
+}
+
 function refreshCanvas() {
   if (!canvas || !state.draft) return;
   const dim = currentDimension();
   if (!dim) return;
-  const proj = projectionFor(dim);
+  const proj = syncAppProjection();
   canvas.setProjection(proj);
   canvas.setData({ waypoints: dim.waypoints, groups: dim.groups, projection: proj });
   canvas.setSelection(state.selection.waypointId);
@@ -467,6 +505,7 @@ function updateCanvasInfo(dim) {
 }
 
 function refreshEditor() {
+  updatePickPositionButton();
   if (!panel) return;
   panel.setDraft?.(state.draft);
   panel.setSelection?.(state.selection);
@@ -541,6 +580,7 @@ function handlePatch(patch) {
 function commit({ structural = false } = {}) {
   state.dirty = true;
   runValidation();
+  syncAppProjection();
   refreshCanvas();
   if (structural) refreshEditor();
   else {
@@ -566,8 +606,13 @@ function handleSelect(sel) {
     activateDimension(nextDim.id);
     return;
   }
+  // 只要选中的目标变了，就取消「等待点击落位」状态，
+  // 否则用户点了 A 再去点地图，会把之前预备好的那个点悄悄挪走。
+  if (state.placeFor && state.placeFor !== state.selection.waypointId) disarmPlacement();
+  if (state.createArmed) disarmCreate();
   canvas?.setSelection(state.selection.waypointId);
   panel?.setSelection?.(state.selection);
+  updatePickPositionButton();
   if (state.selection.waypointId) canvas?.focusWaypoint?.(state.selection.waypointId);
   panel?.refresh?.();
 }
@@ -725,6 +770,10 @@ async function handleAction(name) {
       return toggleGrid();
     case 'toggle-labels':
       return cycleLabels();
+    case 'pick-position':
+      return pickPositionForSelected();
+    case 'create-on-map':
+      return armCreateOnMap();
     case 'goto-calibrate':
       return openCalibrationDialog();
     case 'copy-command':
@@ -900,24 +949,81 @@ async function refreshImageList() {
 
 /* ------------------------------ 结构操作 ------------------------------ */
 
-function newWaypoint() {
+/**
+ * 取「当前视图中心」对应的世界坐标（而不是整张图的中心）：
+ * 图上中心可能远在屏幕外，新建的点会看不见，看起来像没创建。
+ */
+function worldAtViewCenter() {
   const dim = currentDimension();
-  if (!dim) return;
-  pushHistory();
-  const wp = model.createWaypoint(state.draft, dim.id, { name: `新路径点 ${dim.waypoints.length + 1}` });
   const proj = projectionFor(dim);
-  // 先放在当前视图中心对应的世界坐标（拿不到就用图片中点），随后进入「放置模式」，点地图即可定位
-  let center = { x: 0, z: 0 };
-  if (proj && dim.imageMeta?.width) {
-    center = proj.imageToWorld(dim.imageMeta.width / 2, dim.imageMeta.height / 2) || center;
-  }
-  wp.x = Math.round(center.x);
-  wp.z = Math.round(center.z);
+  if (!proj || !canvas) return null;
+  const vs = canvas.getViewState?.();
+  if (!vs || !(vs.scale > 0)) return null;
+  const imgX = (vs.viewWidth / 2 - vs.tx) / vs.scale;
+  const imgY = (vs.viewHeight / 2 - vs.ty) / vs.scale;
+  const world = proj.imageToWorld(imgX, imgY);
+  if (!world || !Number.isFinite(world.x) || !Number.isFinite(world.z)) return null;
+  return { x: Math.round(world.x), z: Math.round(world.z) };
+}
+
+/** 在指定世界坐标新建一个路径点（不进入任何待落位状态） */
+function createWaypointAt(world, { prefix = '新路径点' } = {}) {
+  const dim = currentDimension();
+  if (!dim) return null;
+  const wp = model.createWaypoint(state.draft, dim.id, { name: `${prefix} ${dim.waypoints.length + 1}` });
+  const fallback = worldAtViewCenter() || { x: 0, z: 0 };
+  const target = world && Number.isFinite(world.x) && Number.isFinite(world.z) ? world : fallback;
+  wp.x = Math.round(target.x);
+  wp.z = Math.round(target.z);
   state.selection = { dimensionId: dim.id, waypointId: wp.id, groupId: null };
   commit({ structural: true });
   canvas?.focusWaypoint?.(wp.id);
   canvas?.setSelection?.(wp.id);
-  armPlacement(wp.id, wp.name);
+  updatePickPositionButton();
+  return wp;
+}
+
+function newWaypoint() {
+  const dim = currentDimension();
+  if (!dim) return;
+  pushHistory();
+  const wp = createWaypointAt(worldAtViewCenter());
+  if (!wp) return;
+  toast(
+    `已在当前视图中心新建「${wp.name}」（X ${wp.x} · Z ${wp.z}）。想直接点哪建哪，用顶栏「在图上新建」`,
+    'ok',
+    5200,
+  );
+}
+
+/** 显式「在图上新建」：下一次点地图 = 在点击处新建一个路径点 */
+function armCreateOnMap() {
+  const dim = currentDimension();
+  if (!dim) return false;
+  if (!projectionFor(dim)) {
+    toast('该维度还没有可用的画幅/基底图，无法在图上网点', 'warn', 4000);
+    return false;
+  }
+  state.placeFor = null;
+  state.createArmed = true;
+  state.pendingPick = null;
+  state.pickHandler = null;
+  canvas?.setMode?.('place');
+  const badge = $('mode-badge');
+  if (badge) {
+    badge.hidden = false;
+    badge.textContent = '在图上新建：点击地图即在该处新建路径点 · Esc 取消';
+  }
+  setStatus('在图上新建：在地图上点一下，就会在那里新建一个路径点（Esc 取消）', 'warn');
+  return true;
+}
+
+function disarmCreate() {
+  if (!state.createArmed) return;
+  state.createArmed = false;
+  if (!state.placeFor) canvas?.setMode?.('select');
+  const badge = $('mode-badge');
+  if (badge) badge.hidden = true;
 }
 
 /** 放置模式：下一次点击画布 = 把该路径点移到点击处 */
@@ -934,12 +1040,44 @@ function armPlacement(waypointId, name) {
   setStatus(`放置模式：在地图上点一下设置「${name}」的坐标（拖拽平移不会误触，Esc 取消）`, 'warn');
 }
 
+/** 顶栏「在图上取点」：为当前选中的路径点显式进入放置模式 */
+function pickPositionForSelected() {
+  const dim = currentDimension();
+  const id = state.selection.waypointId;
+  const wp = dim && id ? model.waypointById(dim, id) : null;
+  if (!wp) {
+    toast('先在左侧列表或地图上选中一个路径点，再点「在图上取点」', 'warn', 4000);
+    return false;
+  }
+  if (!state.projection) {
+    toast('该维度还没有可用的画幅/基底图，无法在图上取点', 'warn', 4000);
+    return false;
+  }
+  armPlacement(wp.id, wp.name);
+  return true;
+}
+
+/** 「在图上取点」按钮的可用状态：只有选中了路径点、且有投影时才可点 */
+function updatePickPositionButton() {
+  const btn = $('btn-pick-position');
+  if (!btn) return;
+  const dim = currentDimension();
+  const hasSelection = !!(dim && state.selection.waypointId && model.waypointById(dim, state.selection.waypointId));
+  const canPick = hasSelection && !!state.projection;
+  btn.disabled = !canPick;
+  btn.setAttribute('aria-disabled', canPick ? 'false' : 'true');
+  btn.title = canPick
+    ? '在图上取点：把选中的路径点移到地图上点击的位置（Esc 取消）'
+    : '先在左侧或地图上选中一个路径点';
+}
+
 function disarmPlacement() {
   if (!state.placeFor) return;
   state.placeFor = null;
   canvas?.setMode?.('select');
   const badge = $('mode-badge');
   if (badge) badge.hidden = true;
+  updatePickPositionButton();
 }
 
 function placeAt(world) {
@@ -1603,6 +1741,10 @@ function bindKeyboard() {
         disarmPlacement();
         setStatus('已退出放置模式（路径点仍在原位）', 'info');
       }
+      if (state.createArmed) {
+        disarmCreate();
+        setStatus('已退出「在图上新建」', 'info');
+      }
       const dialog = $('preview-dialog');
       if (dialog && !dialog.hidden) closePreview();
     }
@@ -1650,6 +1792,8 @@ function bindKeyboard() {
   $('zoom-in')?.addEventListener('click', () => canvas?.zoomBy?.(1.35));
   $('zoom-out')?.addEventListener('click', () => canvas?.zoomBy?.(1 / 1.35));
   $('btn-enhance')?.addEventListener('click', toggleEnhance);
+  $('btn-pick-position')?.addEventListener('click', () => handleAction('pick-position'));
+  $('btn-create-on-map')?.addEventListener('click', () => handleAction('create-on-map'));
 
   $('search')?.addEventListener('input', (event) => {
     state.search = String(event.target.value || '').trim();
@@ -1675,6 +1819,18 @@ function api2tool() {
     action: (name) => handleAction(name),
     calibrate: (a, b) => calibrateFromPoints(a, b),
     setOrigin: (opts) => setOriginCalibration(opts || {}),
+    armPlacement: (id) => {
+      const dim = currentDimension();
+      const wp = dim && model.waypointById(dim, id || state.selection.waypointId);
+      if (!wp) return false;
+      armPlacement(wp.id, wp.name);
+      return true;
+    },
+    disarmPlacement: () => disarmPlacement(),
+    pickPosition: () => pickPositionForSelected(),
+    createOnMap: () => armCreateOnMap(),
+    createWaypointAt: (world) => createWaypointAt(world),
+    worldAtViewCenter: () => worldAtViewCenter(),
 
     /* ---- 额外便利 ---- */
     model,
