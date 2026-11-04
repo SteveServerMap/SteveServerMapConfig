@@ -8,7 +8,7 @@
 - CDP 库：复用 `D:\Project\Github\SteveServerMap.github.io\tests\headless.mjs`（用 `file://` 绝对路径 import，不复制粘贴）
 - 运行产物：`tests/artifacts/`（`.gitignore` 掉除 `.gitignore` 以外的一切）
 
-当前状态：**14 项检查全部通过，退出码 0**（§7 的 8 条 + §7.5 拆分 + 5 项加固）。
+当前状态：**16 项检查全部通过，退出码 0**（§7 的 8 条 + §7.5 拆成 3 条 + 8 项加固/回归，其中含「基底图真的被画出来」的可见性回归）。
 
 ---
 
@@ -20,7 +20,7 @@ node tests/e2e.mjs
 ```
 
 - **退出码 0** = 全部检查通过；**退出码 1** = 有失败项或基础设施起不来。
-- 全过程约 **16 秒**（本次实测 16.0 s）。
+- 全过程约 **17 秒**（本次实测 16.9 s）。
 - 结束时保证：工具服务器已 `taskkill /T /F`、浏览器进程已退出、`%TEMP%` 下的站点副本与草稿目录已删除
   （用 `--keep` 时才保留并打印路径）。
 
@@ -69,13 +69,15 @@ node tests/e2e.mjs
 
 ---
 
-## 3. 检查项清单（共 14 项）
+## 3. 检查项清单（共 16 项）
 
 | id | 对应条款 | 断言什么 |
 | --- | --- | --- |
 | `x3-schema-selftest` | 扩展 | 自制 JSON Schema 校验器**确实能拒绝坏配置**（否则 §7.5 的 schema 断言是假阳性） |
 | `c1-health` | §7.1 | `GET /api/health` → 200 且 `ok:true`、`version`/`uptime` 合法；`siteDir`/`dataDir` 指向临时目录 |
 | `c2-page` | §7.2 | **重新导航**后 3 秒内渲染出配置树；console error / 未捕获异常 / HTTP≥400 共 0 条；基底图载入成功 |
+| `c0-visible` | 扩展（可见性回归） | 基底图**真的被画出来**：computed `opacity===1`、class 含 `is-loaded`、尺寸 >50×50、截图亮度 `mean>8` 且 `litRatio>0.05`、`#canvas-info` 含 `W×H` 与图片名 |
+| `c0b-enhance` | 扩展 | 点一次 `#btn-enhance` 只翻转一次（`body[data-enhance]` / `aria-pressed` / `#canvas-image` filter / `localStorage['ssm.enhance.v1']` 同步、再点回原状、不重复绑定） |
 | `c3-tree-count` | §7.3 | `#tree` 里 `[data-waypoint-id]` 数量 = 站点 `config.json` 主世界路径点数（10） |
 | `x1-undo-redo` | 扩展 | 改路径点名称 → `Ctrl+Z` 复原 → `Ctrl+Shift+Z` 再改回（每步读草稿实测） |
 | `c4-calibration` | §7.4 | **全部走真实 UI**：`#btn-calibrate` → 对话框「拾取 A/B」→ CDP 点画布两处 → 填 X/Z → 结果出现 → 应用到草稿 → 保存 → 落盘画幅与站点原画幅误差 < 2 方块 |
@@ -180,20 +182,50 @@ node tests/e2e.mjs
   （`dataUrl` 是一个 1×1 的合法 PNG data URI）。
 - 每个都断言 `4xx` 且 body 是 `{ ok:false, … }`；随后检查副本的上级目录、`sub/`、`%TEMP%` 根目录都没有 `evil.png`。
 
+### 附：可见性回归（`c0-visible` / `c0b-enhance`，「DOM 正确 ≠ 用户看得见」）
+
+§7 的 8 条全都是「数值/结构」断言，**没有一条能保证画面真的画出来了**。事故教训：
+`tool.css` 里 `.canvas-image { opacity: 0 }` + `.canvas-image.is-loaded { opacity: 1 }`，
+而 `canvas.js` 有一段时间没加 `is-loaded` 类 → 基底图 `opacity` 恒为 0，
+用户看到的是「没有地图」，但 `naturalWidth`、`getBoundingClientRect`、标记 transform 全部正常，
+14 项断言全绿。所以补了两条：
+
+- `c0-visible`（放在 §7.2 之后，`requires: ['page']`）：
+  1. **DOM 硬性门槛**：`getComputedStyle(img).opacity === 1`、`class` 含 `\bis-loaded\b`、
+     `visibility === 'visible'` 且 `display !== 'none'`、渲染尺寸 > 50×50、`complete && naturalWidth > 0`；
+  2. **像素级**：`Page.captureScreenshot({ clip: 图片可见区域 })` 截图 → 用 `node:zlib.inflateSync`
+     + 手写反滤波解 PNG（约 70 行，零依赖），统计 `mean` 与 `litRatio`（亮度 >30 的像素占比）。
+     阈值 `mean > 8 && litRatio > 0.05`。实测对照：
+     - 正常显示：`mean = 47.3 / litRatio = 0.233`
+     - 模拟事故（去掉 `is-loaded` → `opacity:0`）：`mean = 16.5 / litRatio = 0.021` → **会被判失败**
+     （`litRatio` 是本图的判别式；`mean` 只兜「整块全黑」，因为关掉提亮后暗图本身 mean 也不高）；
+  3. **信息条**：`#canvas-info` 不能隐藏，文本必须含 `3584×5120`（即图片天然尺寸）与图片名 `主世界.png`。
+- `c0b-enhance`：点一次 `#btn-enhance` → `body[data-enhance]` 必须**只翻转一次**（若一次点击绑了两次监听，
+  会翻转两次又变回来），同时 `aria-pressed`、`#canvas-image` 的 computed `filter`、
+  `localStorage['ssm.enhance.v1']` 同步变化；再点一次回到原状。
+  实测：`data-enhance 1 → 0 → 1`、`aria-pressed true→false`、filter 变化 ✓、`localStorage=0`。
+
+> 注意：`#canvas-image` 在 `tool.css` 里是 `pointer-events: none`（画布拖拽由父层接收），
+> 所以 **不能**用 `document.elementFromPoint/elementsFromPoint` 判断图片有没有被遮挡 —— 那会稳定假失败。
+> 遮挡类问题由「截图亮度」兜。
+
 ---
 
 ## 5. 最近结果
 
 | 时间（本地） | 环境 | 结果 | 耗时 |
 | --- | --- | --- | --- |
-| 2026-11-05 03:41 | Node v24.18.0 · Edge 155 (headless) · Windows | **14 通过 / 0 失败 / 0 跳过 / 0 警告**（退出码 0） | 16.0 s |
+| 2026-11-05 03:59 | Node v24.18.0 · Edge 155 (headless) · Windows | **16 通过 / 0 失败 / 0 跳过 / 0 警告**（退出码 0） | 16.9 s |
 
 逐项（与运行时输出一致）：
 
 ```
 ✓ x3-schema-selftest      站点配置 0 错误；坏配置被拒 3 条
 ✓ c1-health               200 · version=1.0.0 · siteDir=临时副本 · dataDir=--data 指定的临时目录
-✓ c2-page                 重新导航后 382 ms 内完成首屏；树渲染 117 ms；console error / 异常 / HTTP≥400：0
+✓ c2-page                 重新导航后 457 ms 内完成首屏；树渲染 1 ms；console error / 异常 / HTTP≥400：0
+✓ c0-visible              opacity=1、is-loaded ✓、518×740px 显示中；mean=47.3 / litRatio=0.233（阈值 8 / 0.05）
+                          #canvas-info="主世界 · 主世界.png · 3584×5120px"；enhance=1、画布标记 10 个
+✓ c0b-enhance             data-enhance 1 → 0 → 1；aria-pressed true→false；filter 变化 ✓；localStorage=0
 ✓ c3-tree-count           [data-waypoint-id] 10 个 = 站点 10 个；维度 3/3、分组 4/4
 ✓ x1-undo-redo            改名 → Ctrl+Z 复原 → Ctrl+Shift+Z 再改回（各 1 次）
 ✓ c4-calibration          真实校准对话框：拾取 A/B（命中 #canvas-stage）→ 填 X/Z → 应用 → 保存
@@ -215,6 +247,8 @@ node tests/e2e.mjs
 - 早期 `assets/js/model.js`、`editor.js` 还没落地时：3 通过 / 1 失败 / 8 跳过，
   失败原因是 `/assets/js/model.js` 等 404 导致白屏——脚本给出的就是这条具体信息。
 - 校准对话框修好之前：13 通过 / 0 失败 / 1 警告（§7.4 靠 `__tool.calibrate` 兜底）。
+- 可见性回归补上之前：14 通过 / 0 失败 / 0 警告 —— **全绿但地图根本没显示**，这就是 `c0-visible` 的存在理由。
+  补测时用「运行时去掉 `is-loaded` 类」复现：`mean` 47.3 → 16.5、`litRatio` 0.233 → 0.021，确认新断言会失败。
 
 ---
 
@@ -259,7 +293,16 @@ node tests/e2e.mjs
 需要同步扩展 `validateSchema()`。校验器本身有自检项（`x3-schema-selftest`）：
 必须能拒绝「维度缺 image」和「缺少 dimensions」的坏配置，避免出现「永远通过」的假阳性。
 
-### 6.6 其它
+### 6.6 像素可见性断言的阈值与「当前这张图」绑定
+
+`c0-visible` 的截图亮度阈值是在**当前站点基图（主世界.png）**上实测校准的：正常 `mean 47.3 / litRatio 0.233`，
+`opacity:0` 时 `mean 16.5 / litRatio 0.021`，所以取 `mean > 8 && litRatio > 0.05`。
+如果以后换成「大部分是白色/浅色」的基图，`litRatio` 会天然接近 1（判别力下降），
+届时需要重新测一组「正常 vs 故意 opacity:0」的数值再调阈值；`mean > 8` 只用于兜「整块全黑」，不参与判别。
+另外截图裁的是「图片与视口/画布的交集」，所以换了视口尺寸（`--headed`）时统计比例可能略有变化，
+但 `litRatio` 的判别式仍然成立。
+
+### 6.7 其它
 
 - 断言里保留了「按中文文案找按钮」的兜底（如「保存到站点」「真实预览」）；改文案时可能影响兜底路径，
   但 id/data-* 选择器优先级更高（`#btn-*`、`[data-action]`、`[data-field]`、`[data-waypoint-id]`）。
@@ -302,6 +345,12 @@ node tests/e2e.mjs
 - 选择器优先级（从稳到脆）：`id` → `data-*` → 文本正则 → `window.__tool`。
   新增断言尽量用前三种，别写死中文。
 - 需要新的前置条件时：在 `run` 里设置 `ctx.flags.xxx = true`，别的检查用 `requires: ['xxx']` 依赖它。
+- **新增任何「应该显示在屏幕上」的 UI 元素 / 图片 / 画布内容，必须补一条可见性断言**，不能只断言
+  「元素存在 + 尺寸正确」。至少覆盖：computed `opacity`/`visibility`/`display`、必要的 class/data 属性；
+  对图片、canvas、关键区块再补**像素级**检查（`Page.captureScreenshot({ clip })` + `pngBrightness()`）。
+  理由：`opacity:0`、`filter: brightness(0)`、被浮层盖住、父容器 `display:none` 这几种情况下，
+  `naturalWidth` / `getBoundingClientRect` / 标记 `transform` 全部正常，纯结构断言会全绿（见 §9 第 8 条）。
+- 像素断言的阈值要「先用正常/故障两态各测一次再定」，并写进 `docs/QA.md`；别凭感觉取数。
 - **不要**把 `--site` 指向真实仓库，也不要在 `tests/` 里直接读写真实站点——所有写入都必须落在临时副本。
 
 ---
@@ -319,4 +368,5 @@ node tests/e2e.mjs
 | 4 | 对话框全屏遮罩 `position:fixed; inset:0` 把画布点击全吃掉，点「拾取 A」后没法点地图（点到遮罩还会关掉对话框） | 拾取时遮罩/面板 `pointer-events:none` + 面板淡化到 0.12 + 底部提示条「点击地图拾取地标 A · Esc 取消」，拾取完成后恢复 |
 | 5 | 手填 X/Z 后「应用并关闭」永远是 `disabled`：四个 `[data-slot=a-x…]` 输入框没有 `input`/`change` 监听，`recompute()` 只在拾取回调里跑 | 给四个输入框补 `input`/`change → recompute`，现在填完就出「X：… Z：…」解算结果 |
 | 6 | 「新增路径点」后点画布不会落位（`onEmptyClick` 里没有放置逻辑），§7.5「画布点一下」只能退化到拖拽 | 新增 `place` 模式：`armPlacement()` 设 `canvas.setMode('place')` + `#mode-badge` 提示，点地图调用 `placeAt()`，落位后自动回 `select`（对应 `c5c-place`） |
-| 7 | 把维度 `id` 改空后 UI 再也改不回来（`handlePatch` 用 `currentDimension()` 定位维度，找不到就 `return`） | **尚未修复**，e2e 在 §7.6 之后自行修复现场并打警告/留痕；建议改用表单的 `data-entity-id` / `data-dimension-id` 定位（见 6.6） |
+| 7 | 把维度 `id` 改空后 UI 再也改不回来（`handlePatch` 用 `currentDimension()` 定位维度，找不到就 `return`） | **尚未修复**，e2e 在 §7.6 之后自行修复现场并打警告/留痕；建议改用表单的 `data-entity-id` / `data-dimension-id` 定位（见 6.7） |
+| 8 | **地图图片在 DOM 里、尺寸/坐标全对，但屏幕上永远不显示**：`tool.css` 写的是 `.canvas-image{opacity:0}` + `.canvas-image.is-loaded{opacity:1}`，而 `canvas.js` 的 `setImage` 从没加 `is-loaded` 类 → computed `opacity` 恒为 0。**当时 14 项断言全绿**，因为只查了 `naturalWidth` / `getBoundingClientRect` / 标记 `transform`——这些在 `opacity:0` 时全都正常 | `canvas.js` 的 `onLoad` 里补 `img.classList.add('is-loaded')` + `img.style.opacity='1'`；e2e 新增 `c0-visible`（opacity/`is-loaded`/尺寸硬性断言 + **截图像素亮度** `mean/litRatio` + `#canvas-info` 文本含 `3584×5120`）与 `c0b-enhance`（提亮按钮一次点击只翻转一次）。像素断言用「运行时去掉 `is-loaded`」复现验证：`mean 47.3→16.5`、`litRatio 0.233→0.021`，确认会失败 |

@@ -1044,7 +1044,9 @@ function buildCalibrationDialog(dim, coords) {
   Object.assign(overlay.style, {
     position: 'fixed', inset: '0', zIndex: '80',
     display: 'grid', placeItems: 'center',
-    background: 'rgba(6, 9, 7, .72)', backdropFilter: 'blur(6px)',
+    // 不要 backdrop 模糊：校准时用户要在地图上找地标、点像素，模糊会让点不准
+    background: 'rgba(6, 9, 7, .5)',
+    backdropFilter: 'none',
   });
 
   const box = document.createElement('div');
@@ -1108,9 +1110,15 @@ function buildCalibrationDialog(dim, coords) {
   const setPickingUI = (on, label = '') => {
     overlay.style.pointerEvents = on ? 'none' : 'auto';
     box.style.pointerEvents = on ? 'none' : 'auto';
-    box.style.opacity = on ? '0.12' : '1';
-    box.style.filter = on ? 'blur(1px)' : 'none';
-    box.style.transition = 'opacity .18s ease, filter .18s ease';
+    // 拾取时把对话框彻底藏起来（不是半透明残留），背景也几乎不压暗，
+    // 这样地图保持 100% 清晰，才能点准地标像素。
+    box.style.opacity = on ? '0' : '1';
+    box.style.visibility = on ? 'hidden' : 'visible';
+    box.style.filter = 'none';
+    box.style.transition = 'opacity .18s ease';
+    overlay.style.background = on ? 'rgba(6, 9, 7, .08)' : 'rgba(6, 9, 7, .5)';
+    overlay.style.backdropFilter = 'none';
+    document.body.dataset.picking = on ? '1' : '0';
     if (on) {
       if (!hintEl) {
         hintEl = document.createElement('div');
@@ -1581,6 +1589,7 @@ function calibrateFromPoints(a, b) {
 }
 
 export { state, api, saveToSite as save };
+
 
 
 

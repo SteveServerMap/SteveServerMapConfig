@@ -2,7 +2,7 @@
 /**
  * tests/e2e.mjs —— SteveServerMapConfig 端到端验收（零依赖，一条命令跑完）
  * =============================================================================
- * 覆盖 docs/CONTRACT.md §7 的 8 条验收标准，外加 4 项加固检查：
+ * 覆盖 docs/CONTRACT.md §7 的 8 条验收标准，外加 8 项加固检查（共 16 项）：
  *   §7.1 server 启动 + GET /api/health 200
  *   §7.2 3 秒内渲染出配置树，无 console error / 未捕获异常 / HTTP≥400
  *   §7.3 树里的路径点数量与站点 config.json 一致（主世界 10 个）
@@ -11,7 +11,9 @@
  *   §7.6 存在 error 时保存被阻止并提示
  *   §7.7 预览 iframe 渲染出「草稿」的路径点数量
  *   §7.8 越界写入（fileName: "../evil.png"）被 4xx 拒绝
- *   扩展：撤销/重做、保存备份 config.json.bak-*、JSON Schema 校验器自检
+ *   扩展：基底图「真的被画出来」（opacity/is-loaded + 截图亮度）、提亮按钮一次点击只翻转一次、
+ *         放置模式 place、撤销/重做、保存备份 config.json.bak-*、JSON Schema 校验器自检、
+ *         真实站点仓库零改动取证
  *
  * 三条硬性纪律：
  *   1. **绝不碰真实站点仓库**：先把站点复制到 %TEMP%\ssm-cfg-e2e-<随机>，
@@ -20,6 +22,10 @@
  *      临时站点/草稿目录跑完删除（--keep 时保留并打印路径）。
  *   3. **零依赖**：只 import Node 内置模块 + 站点仓库里现成的 CDP 库
  *      （D:\Project\Github\SteveServerMap.github.io\tests\headless.mjs，用 file:// 绝对路径导入）。
+ *
+ * 教训：DOM 里的 naturalWidth / getBoundingClientRect 正确 ≠ 用户看得见。
+ * 凡是「应该显示出来」的东西，都要额外断言 computed opacity/visibility 或直接做像素级检查
+ * （见 checkCanvasVisible：它就是为了挡住「图片 opacity:0 却全绿」这类事故）。
  *
  * 用法：
  *   node tests/e2e.mjs                        # 完整跑一遍（默认）
@@ -41,6 +47,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import zlib from 'node:zlib';
 import net from 'node:net';
 import fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
@@ -203,6 +210,109 @@ async function removeDir(dir) {
     }
   }
   return false;
+}
+
+/**
+ * 零依赖 PNG 解码（只支持 Chrome 截图会产出的形态：8bit、非隔行、RGB/RGBA/灰度）。
+ * 用途：把「DOM 看着对、但屏幕上根本没画出来」这类可见性问题（opacity/filter/遮挡/尺寸为 0）挡在门外。
+ */
+function decodePng(buffer) {
+  if (buffer.length < 8 || buffer.readUInt32BE(0) !== 0x89504e47) throw new Error('截图不是 PNG');
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  let interlace = 0;
+  const idat = [];
+  while (offset + 8 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.toString('ascii', offset + 4, offset + 8);
+    const dataStart = offset + 8;
+    if (type === 'IHDR') {
+      width = buffer.readUInt32BE(dataStart);
+      height = buffer.readUInt32BE(dataStart + 4);
+      bitDepth = buffer[dataStart + 8];
+      colorType = buffer[dataStart + 9];
+      interlace = buffer[dataStart + 12];
+    } else if (type === 'IDAT') {
+      idat.push(buffer.subarray(dataStart, dataStart + length));
+    } else if (type === 'IEND') {
+      break;
+    }
+    offset = dataStart + length + 4;
+  }
+  assert(width > 0 && height > 0, `PNG 尺寸非法：${width}×${height}`);
+  assert(bitDepth === 8, `暂不支持 PNG 位深 ${bitDepth}`);
+  assert(interlace === 0, '暂不支持隔行 PNG');
+  const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 0 ? 1 : 0;
+  assert(channels > 0, `暂不支持 PNG colorType=${colorType}`);
+
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = width * channels;
+  const out = Buffer.alloc(height * stride);
+  let pos = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[pos];
+    pos += 1;
+    const rowStart = y * stride;
+    const prevStart = rowStart - stride;
+    for (let x = 0; x < stride; x += 1) {
+      const byte = raw[pos + x];
+      const a = x >= channels ? out[rowStart + x - channels] : 0;
+      const b = y > 0 ? out[prevStart + x] : 0;
+      const c = x >= channels && y > 0 ? out[prevStart + x - channels] : 0;
+      let value;
+      switch (filter) {
+        case 0:
+          value = byte;
+          break;
+        case 1:
+          value = byte + a;
+          break;
+        case 2:
+          value = byte + b;
+          break;
+        case 3:
+          value = byte + ((a + b) >> 1);
+          break;
+        case 4: {
+          const p = a + b - c;
+          const pa = Math.abs(p - a);
+          const pb = Math.abs(p - b);
+          const pc = Math.abs(p - c);
+          value = byte + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
+          break;
+        }
+        default:
+          throw new Error(`未知 PNG 行过滤器 ${filter}`);
+      }
+      out[rowStart + x] = value & 0xff;
+    }
+    pos += stride;
+  }
+  return { width, height, channels, data: out };
+}
+
+/** 统计亮度：mean（0~255 平均亮度）与 litRatio（亮度 > 30 的像素占比） */
+function pngBrightness(base64, { litThreshold = 30 } = {}) {
+  const png = decodePng(Buffer.from(base64, 'base64'));
+  const { width, height, channels, data } = png;
+  const count = width * height;
+  let sum = 0;
+  let lit = 0;
+  for (let i = 0, p = 0; i < count; i += 1, p += channels) {
+    const lum = 0.2126 * data[p] + 0.7152 * data[p + 1] + 0.0722 * data[p + 2];
+    sum += lum;
+    if (lum > litThreshold) lit += 1;
+  }
+  return {
+    width,
+    height,
+    pixels: count,
+    mean: sum / count,
+    litRatio: lit / count,
+  };
 }
 
 function hashFile(file) {
@@ -1196,6 +1306,230 @@ async function checkPageRender(ctx) {
   const facts = await domFacts(page);
   assert(facts.imageLoaded, `画布基底图没有载入（#canvas-image naturalWidth=${facts.imageNatural?.width ?? 0}）`);
   return `重新导航后 ${formatDuration(Date.now() - navStarted)} 内完成首屏；树渲染 ${formatDuration(elapsed)}（< 3000ms）· ${hit.mode} 命中 ${hit.waypoints} 个路径点 · 图片 ${facts.imageNatural.width}×${facts.imageNatural.height} · console error / 异常 / HTTP≥400：0 条`;
+}
+
+/* ------------------------------ 可见性：基底图真的被画出来了 ------------------------------ */
+
+/**
+ * 事故回归：tool.css 里 `.canvas-image { opacity: 0 }` + `.is-loaded { opacity: 1 }`，
+ * 而 canvas.js 有一段时间没加 `is-loaded` 类 → 图片在 DOM 里、尺寸/坐标全对，但屏幕上**完全不显示**。
+ * 之前的断言只看 naturalWidth / getBoundingClientRect，全部通过 → 漏检。
+ *
+ * 这里三条独立证据：
+ *   ① DOM：computed opacity === 1、class 含 is-loaded、visibility 可见、尺寸 > 50×50；
+ *   ② 像素：截取图片区域算亮度（mean / 亮像素占比），能兜住 opacity/filter/遮挡/尺寸为 0；
+ *   ③ 信息条：#canvas-info 必须显示「维度 · 图片 · W×H px」。
+ *
+ * 注意：#canvas-image 在 tool.css 里是 pointer-events:none（画布要靠父层接收拖拽），
+ * 所以不能用 elementFromPoint/elementsFromPoint 判断「有没有被遮挡」——那会稳定假失败。
+ */
+async function checkCanvasVisible(ctx) {
+  const page = ctx.page;
+
+  // 先等 app 的「自动提亮」异步判定落定（body[data-enhance] 被赋值即表示判定完成），
+  // 否则截图可能落在提亮前的一帧，亮度阈值不稳定。
+  await page
+    .waitFor(() => document.body.dataset.enhance !== undefined, {
+      timeout: 5000,
+      interval: 100,
+      label: '自动提亮判定完成',
+    })
+    .catch(() => {});
+  await page.settle(200);
+
+  const vis = await page.evalFn(() => {
+    const img = document.getElementById('canvas-image');
+    if (!img) return { error: '缺少 #canvas-image' };
+    const cs = getComputedStyle(img);
+    const rect = img.getBoundingClientRect();
+    const info = document.getElementById('canvas-info');
+    return {
+      opacity: cs.opacity,
+      className: img.className,
+      visibility: cs.visibility,
+      display: cs.display,
+      filter: cs.filter,
+      complete: img.complete,
+      natural: [img.naturalWidth, img.naturalHeight],
+      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      enhance: document.body.dataset.enhance ?? null,
+      infoHidden: info ? info.hidden : null,
+      infoText: info ? (info.textContent || '').trim() : null,
+      markers: document.querySelectorAll('#canvas-overlay .marker').length,
+    };
+  });
+  assert(!vis.error, vis.error);
+
+  // ① DOM 层：图片必须真的可见
+  assert(
+    Number(vis.opacity) === 1,
+    `#canvas-image 的 opacity 实际 ${vis.opacity} vs 期望 1（tool.css 里 .canvas-image 默认 opacity:0，检查 canvas.js 是否给图片加了 is-loaded 类）`,
+  );
+  assert(
+    /\bis-loaded\b/.test(String(vis.className)),
+    `#canvas-image 缺少 is-loaded 类：class="${vis.className}"（没有它 → opacity 恒为 0 → 地图永远不显示）`,
+  );
+  assert(
+    vis.visibility === 'visible' && vis.display !== 'none',
+    `#canvas-image 的 visibility/display 实际 ${vis.visibility}/${vis.display} vs 期望 visible/非 none`,
+  );
+  assert(
+    vis.complete === true && vis.natural[0] > 0 && vis.natural[1] > 0,
+    `#canvas-image 未加载完成：complete=${vis.complete} natural=${vis.natural.join('×')}`,
+  );
+  assert(
+    vis.rect.width > 50 && vis.rect.height > 50,
+    `#canvas-image 渲染尺寸 实际 ${Math.round(vis.rect.width)}×${Math.round(vis.rect.height)} vs 期望 > 50×50（可能被父容器压成 0）`,
+  );
+
+  // ③ 信息条：#canvas-info 必须显示当前图片信息
+  assert(vis.infoHidden === false, '#canvas-info 实际隐藏 vs 期望可见（应显示「维度 · 图片 · W×H px」）');
+  const sizeText = `${vis.natural[0]}×${vis.natural[1]}`;
+  assert(
+    String(vis.infoText || '').includes(sizeText),
+    `#canvas-info 文本 实际 "${truncate(vis.infoText, 70)}" 不含 "${sizeText}"`,
+  );
+  if (ctx.siteImageName) {
+    assert(
+      String(vis.infoText || '').includes(ctx.siteImageName),
+      `#canvas-info 文本 实际 "${truncate(vis.infoText, 70)}" 不含图片名 "${ctx.siteImageName}"`,
+    );
+  }
+
+  // ② 像素层：截图片区域算亮度（这才是「眼睛看到的东西」）
+  const clip = await page.evalFn(() => {
+    const img = document.getElementById('canvas-image');
+    if (!img) return { error: '缺少 #canvas-image' };
+    const rect = img.getBoundingClientRect();
+    const left = Math.max(0, rect.left);
+    const top = Math.max(0, rect.top);
+    const right = Math.min(window.innerWidth, rect.right);
+    const bottom = Math.min(window.innerHeight, rect.bottom);
+    const width = Math.floor(right - left);
+    const height = Math.floor(bottom - top);
+    if (width < 60 || height < 60) return { error: `图片可见区域太小：${width}×${height}` };
+    return {
+      x: Math.floor(left) + window.scrollX,
+      y: Math.floor(top) + window.scrollY,
+      width: Math.min(width, 960),
+      height: Math.min(height, 720),
+    };
+  });
+  assert(!clip.error, clip.error);
+
+  const shot = await page.send('Page.captureScreenshot', {
+    format: 'png',
+    clip: { x: clip.x, y: clip.y, width: clip.width, height: clip.height, scale: 1 },
+    fromSurface: true,
+    captureBeyondViewport: false,
+  });
+  const stats = pngBrightness(shot.data, { litThreshold: 30 });
+  // 阈值经过实测校准（同一块图片区域、同一台机器）：
+  //   正常显示（自动提亮开）：mean ≈ 47.3 / litRatio ≈ 0.233
+  //   模拟事故（去掉 is-loaded → opacity:0）：mean ≈ 16.5 / litRatio ≈ 0.021
+  // 所以 litRatio 是本图的判别式（0.021 vs 0.233，阈值 0.05 两边各有 2 倍以上余量）；
+  // mean 只用来兜「整块全黑」，不参与判别——因为关掉提亮后暗图本身 mean 也不高。
+  assert(
+    stats.mean > 8 && stats.litRatio > 0.05,
+    `地图区域像素几乎全黑，图片没有被绘制：mean=${stats.mean.toFixed(1)}（期望 > 8）· litRatio=${stats.litRatio.toFixed(3)}（期望 > 0.05）· ` +
+      `截图 ${stats.width}×${stats.height}（opacity=${vis.opacity}、filter=${vis.filter}、enhance=${vis.enhance}）`,
+  );
+
+  return (
+    `opacity=1、is-loaded ✓、${Math.round(vis.rect.width)}×${Math.round(vis.rect.height)}px 显示中；` +
+    `像素统计 mean=${stats.mean.toFixed(1)} / litRatio=${stats.litRatio.toFixed(3)}（阈值 8 / 0.05，截图 ${stats.width}×${stats.height}）；` +
+    `#canvas-info="${truncate(vis.infoText, 40)}"；enhance=${vis.enhance ?? '未判定'}、画布标记 ${vis.markers} 个`
+  );
+}
+
+/**
+ * 提亮按钮回归：点一次 `#btn-enhance` 必须只翻转一次（防止一次点击绑定两次监听），
+ * `body[data-enhance]` / `#canvas-image` 的 computed filter / `localStorage['ssm.enhance.v1']` / aria-pressed 同步变化；
+ * 再点一次回到原状态。
+ */
+async function checkEnhanceToggle(ctx) {
+  const page = ctx.page;
+  const btn = await findClickable(page, { selectors: ['#btn-enhance'], texts: [] });
+  assert(btn, '找不到提亮按钮 #btn-enhance');
+
+  const before = await page.evalFn(() => {
+    const img = document.getElementById('canvas-image');
+    const b = document.getElementById('btn-enhance');
+    return {
+      enhance: document.body.dataset.enhance ?? null,
+      pressed: b ? b.getAttribute('aria-pressed') : null,
+      filter: img ? getComputedStyle(img).filter : null,
+      stored: (() => {
+        try {
+          return localStorage.getItem('ssm.enhance.v1');
+        } catch {
+          return null;
+        }
+      })(),
+    };
+  });
+  assert(
+    before.enhance === '0' || before.enhance === '1',
+    `body[data-enhance] 实际 ${JSON.stringify(before.enhance)} vs 期望 '0' 或 '1'（自动判定没跑或没写 data 属性）`,
+  );
+
+  const expected = before.enhance === '1' ? '0' : '1';
+  await page.click(btn.cx, btn.cy);
+  const after = await waitUntil(
+    () =>
+      page.evalFn(() => {
+        const img = document.getElementById('canvas-image');
+        const b = document.getElementById('btn-enhance');
+        const state = window.__tool?.state?.();
+        return {
+          enhance: document.body.dataset.enhance ?? null,
+          pressed: b ? b.getAttribute('aria-pressed') : null,
+          filter: img ? getComputedStyle(img).filter : null,
+          enhanceOn: state ? state.enhanceOn : null,
+          stored: (() => {
+            try {
+              return localStorage.getItem('ssm.enhance.v1');
+            } catch {
+              return null;
+            }
+          })(),
+        };
+      }),
+    {
+      timeout: 3000,
+      interval: 100,
+      label: `点击 #btn-enhance 后 body[data-enhance] 变成 '${expected}'`,
+    },
+  ).catch(async (error) => {
+    const now = await page.evalFn(() => document.body.dataset.enhance ?? null);
+    throw new Error(`${error.message}；实际 data-enhance=${JSON.stringify(now)}（一次点击可能绑定了两次监听，翻转了两次又变回来）`);
+  });
+
+  assert(
+    after.enhance === expected,
+    `点击提亮后 body[data-enhance] 实际 ${JSON.stringify(after.enhance)} vs 期望 ${JSON.stringify(expected)}`,
+  );
+  assert(
+    after.pressed === (expected === '1' ? 'true' : 'false'),
+    `#btn-enhance 的 aria-pressed 实际 ${JSON.stringify(after.pressed)} vs 期望 ${JSON.stringify(expected === '1' ? 'true' : 'false')}`,
+  );
+  assert(
+    after.filter !== before.filter,
+    `点击提亮后 #canvas-image 的 computed filter 没变（实际 "${after.filter}" vs 之前 "${before.filter}"）`,
+  );
+  assert(
+    after.stored === expected,
+    `localStorage['ssm.enhance.v1'] 实际 ${JSON.stringify(after.stored)} vs 期望 ${JSON.stringify(expected)}`,
+  );
+
+  // 再点一次，回到原状态
+  await page.click(btn.cx, btn.cy);
+  await waitUntil(
+    () => page.evalFn((want) => (document.body.dataset.enhance ?? null) === want, before.enhance),
+    { timeout: 3000, interval: 100, label: `再次点击后 body[data-enhance] 回到 '${before.enhance}'` },
+  );
+
+  return `data-enhance ${before.enhance} → ${after.enhance} → ${before.enhance}；aria-pressed ${before.pressed}→${after.pressed}；filter 变化 ✓；localStorage=${after.stored}`;
 }
 
 /* ------------------------------ §7.3 树里的路径点数量 ------------------------------ */
@@ -2453,6 +2787,8 @@ const CHECKS = [
   { id: 'x3-schema-selftest', label: '扩展：JSON Schema 校验器自检（坏配置必须被拒）', requires: [], run: checkSchemaSelfTest },
   { id: 'c1-health', label: '§7.1 server 启动 + GET /api/health 返回 200', requires: ['server'], run: checkHealth, setsFlag: 'server' },
   { id: 'c2-page', label: '§7.2 3 秒内渲染配置树，无 console error / 异常 / HTTP≥400', requires: ['browser'], run: checkPageRender, setsFlag: 'page' },
+  { id: 'c0-visible', label: '扩展：基底图真的被绘制出来（opacity/is-loaded + 像素亮度 + #canvas-info）', requires: ['page'], run: checkCanvasVisible },
+  { id: 'c0b-enhance', label: '扩展：提亮按钮一次点击只翻转一次（data-enhance / filter / localStorage）', requires: ['page'], run: checkEnhanceToggle },
   { id: 'c3-tree-count', label: '§7.3 树里的路径点数量 = 站点主世界 10 个', requires: ['page'], run: checkTreeCount },
   { id: 'x1-undo-redo', label: '扩展：撤销 / 重做（Ctrl+Z / Ctrl+Shift+Z）', requires: ['page'], run: checkUndoRedo },
   { id: 'c4-calibration', label: '§7.4 两点校准解算误差 < 2 方块（并落盘）', requires: ['page'], run: checkCalibration, setsFlag: 'calibrated' },
@@ -2605,6 +2941,7 @@ async function preflight(ctx) {
   ctx.originalCalibration = { ...(over?.calibration || {}) };
   ctx.siteTitle = siteConfig.site?.title;
   ctx.dimensionId = over?.id ? String(over.id) : 'overworld';
+  ctx.siteImageName = over?.image ? String(over.image) : null;
 
   if (OPT.url) {
     // 复用已经启动的服务：站点目录从 /api/state 里取，绝不擅自启动新服务器
