@@ -13,6 +13,10 @@ import * as model from './model.js';
 import { EditorCanvas } from './canvas.js';
 import { EditorPanel } from './editor.js';
 
+// 让 index.html 的兜底提示能区分「模块压根没跑起来」和「模块在跑、只是慢」：
+// 只要这一行执行了，说明 ES Module 加载成功，不需要再提示 file:// 那一套。
+window.__toolBooting = true;
+
 /* ============================== DOM 小工具 ============================== */
 
 const $ = (id) => document.getElementById(id);
@@ -46,6 +50,10 @@ const state = {
   pickHandler: null,
   pickExitHook: null,
   picks: { a: null, b: null },
+
+  /** 暗图提亮：enhancePref = null 表示按图片亮度自动判断 */
+  enhancePref: null,
+  enhanceOn: false,
 
   /** 放置模式：placeFor = 正在等待点击落位的路径点 id */
   placeFor: null,
@@ -90,6 +98,10 @@ bootstrap().catch((err) => {
   console.error('[tool] 启动失败：', err);
   setStatus(`启动失败：${err.message}`, 'error');
   toast(`启动失败：${err.message}`, 'error');
+  // 画布区给出可操作提示，避免「一片空白不知道哪里错了」
+  showCanvasEmpty(
+    `应用没有启动成功：${err.message} —— 请确认页面是用 node server.mjs 启动后通过 http://127.0.0.1:5273/ 打开的（不要双击 index.html）`,
+  );
 });
 
 async function bootstrap() {
@@ -133,6 +145,7 @@ async function bootstrap() {
   // 3) 界面
   initPanel();
   initCanvas();
+  state.enhancePref = readEnhancePref();
   panel?.setImages?.(state.images);
 
   const firstDim =
@@ -300,11 +313,14 @@ async function loadImageFor(dim) {
   if (!size || !size.width) {
     dim.imageMeta = { width: 0, height: 0, missing: true };
     canvas.setImage({ src: '', width: 0, height: 0 });
+    updateCanvasInfo(null);
     return null;
   }
   dim.imageMeta = { width: size.width, height: size.height, missing: false };
   ensureCalibration(dim, size);
   canvas.setImage({ src, width: size.width, height: size.height });
+  updateCanvasInfo(dim);
+  autoEnhanceFor(src);
   return size;
 }
 
@@ -339,6 +355,115 @@ function refreshCanvas() {
   canvas.setGrid(state.draft.ui?.grid === true);
   canvas.setLabelMode(state.draft.ui?.labelMode || 'hover');
   canvas.setFilter(state.search ? (wp) => model.waypointMatchesQuery(wp, state.search) : null);
+}
+
+/* ------------------------------ 暗图提亮 / 画布信息 ------------------------------ */
+
+/** 很多离线渲染的地图大部分是未探索的纯黑，在深色界面上看起来像“没有地图”。
+ *  这里按需给基底图加一个 brightness filter（纯黑仍是黑，不会失真），并记住用户选择。 */
+const ENHANCE_FILTER = 'brightness(2.8) saturate(1.15) contrast(1.02)';
+const ENHANCE_KEY = 'ssm.enhance.v1';
+
+function readEnhancePref() {
+  try {
+    const value = localStorage.getItem(ENHANCE_KEY);
+    if (value === '1') return true;
+    if (value === '0') return false;
+    return null; // 未选择过 → 按图片亮度自动判断
+  } catch {
+    return null;
+  }
+}
+
+function applyEnhance(on) {
+  const img = $('canvas-image');
+  if (img) img.style.filter = on ? ENHANCE_FILTER : 'none';
+  document.body.dataset.enhance = on ? '1' : '0';
+  state.enhanceOn = on;
+  const btn = $('btn-enhance');
+  if (btn) {
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.classList.toggle('is-active', on);
+    btn.title = on ? '已提亮：点击关闭（纯黑的是未探索区域）' : '提亮基底图（很多离线地图渲染很暗）';
+  }
+}
+
+/** 缩略图统计：平均亮度 + “有内容像素”占比，用来判断这张图是不是暗图 */
+function analyzeImage(src) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const size = 64;
+        const cv = document.createElement('canvas');
+        cv.width = size;
+        cv.height = size;
+        const ctx = cv.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, size, size);
+        const data = ctx.getImageData(0, 0, size, size).data;
+        let sum = 0;
+        let lit = 0;
+        let n = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          const lum = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+          sum += lum;
+          if (lum > 26) lit += 1;
+          n += 1;
+        }
+        resolve({ mean: sum / n, litRatio: lit / n });
+      } catch (err) {
+        console.warn('[tool] 图片亮度分析失败：', err);
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
+
+function autoEnhanceFor(src) {
+  const pref = state.enhancePref;
+  if (pref !== null && pref !== undefined) {
+    applyEnhance(pref === true);
+    return;
+  }
+  analyzeImage(src).then((stats) => {
+    if (!stats) return;
+    const dark = stats.litRatio < 0.45 || stats.mean < 42;
+    applyEnhance(dark);
+    if (dark) {
+      toast(
+        `这张基底图很暗（约 ${Math.round((1 - stats.litRatio) * 100)}% 是未探索的纯黑区域），已自动提亮显示；可用顶栏「提亮」关闭`,
+        'info',
+        7000,
+      );
+    }
+  });
+}
+
+function toggleEnhance() {
+  const next = !state.enhanceOn;
+  state.enhancePref = next;
+  try {
+    localStorage.setItem(ENHANCE_KEY, next ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+  applyEnhance(next);
+  toast(next ? '已提亮基底图（纯黑的是未探索区域）' : '已关闭提亮，显示原始亮度', 'info', 2600);
+}
+
+/** 画布左上角信息条：明确告诉用户当前显示的是哪张图、多大 */
+function updateCanvasInfo(dim) {
+  const el = $('canvas-info');
+  if (!el) return;
+  const meta = (dim && dim.imageMeta) || {};
+  if (!dim || !meta.width) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.textContent = `${dim.name} · ${dim.image} · ${meta.width}×${meta.height}px`;
 }
 
 function refreshEditor() {
@@ -1368,6 +1493,7 @@ function bindKeyboard() {
   $('btn-fit')?.addEventListener('click', () => canvas?.fitToContent?.());
   $('zoom-in')?.addEventListener('click', () => canvas?.zoomBy?.(1.35));
   $('zoom-out')?.addEventListener('click', () => canvas?.zoomBy?.(1 / 1.35));
+  $('btn-enhance')?.addEventListener('click', toggleEnhance);
 
   $('search')?.addEventListener('input', (event) => {
     state.search = String(event.target.value || '').trim();
@@ -1455,6 +1581,10 @@ function calibrateFromPoints(a, b) {
 }
 
 export { state, api, saveToSite as save };
+
+
+
+
 
 
 

@@ -717,6 +717,10 @@ export class EditorCanvas {
         }
         this._showEmpty(false);
         this._setImageSize(naturalW, naturalH);
+        // tool.css 里 .canvas-image 默认 opacity:0，加载完成后靠这个类淡入；
+        // 少了这一行图片会永远不可见（DOM 有、尺寸对、但画不出来）。
+        img.classList.add('is-loaded');
+        img.style.opacity = '1';
         finish({ width: naturalW, height: naturalH });
       };
       const onError = () => {
@@ -1946,3 +1950,4 @@ const ICON_FALLBACKS = Object.freeze({
 });
 
 export default EditorCanvas;
+

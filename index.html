@@ -44,6 +44,10 @@
       </div>
       <div class="toolbar-sep" aria-hidden="true"></div>
       <div class="toolbar-group">
+        <button id="btn-enhance" class="btn ghost" type="button" aria-pressed="false"
+                title="提亮基底图（很多离线地图渲染很暗，纯黑的是未探索区域）">
+          <svg class="icon"><use href="#i-sun"></use></svg><span>提亮</span>
+        </button>
         <button id="btn-preview" class="btn ghost" type="button" title="用真实站点预览当前配置">
           <svg class="icon"><use href="#i-eye"></use></svg><span>真实站点预览</span>
         </button>
@@ -90,6 +94,7 @@
         </div>
         <div id="canvas-overlay" class="canvas-overlay"></div>
         <div id="canvas-empty" class="canvas-empty" hidden></div>
+        <div id="canvas-info" class="canvas-info" hidden></div>
         <div id="mode-badge" class="mode-badge" hidden></div>
         <div id="coord-readout" class="coord-readout" hidden>X — Z —</div>
         <div class="zoom-panel" role="group" aria-label="缩放">
@@ -185,9 +190,70 @@
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2.5h8a2 2 0 012 2V18a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9.5 5l7 7-7 7"/></symbol>
     <symbol id="i-grid" viewBox="0 0 24 24"><path d="M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></symbol>
   </defs>
 </svg>
+
+<!-- ==================== 启动兜底提示（不依赖 ES Module） ==================== -->
+<!-- 浏览器在 file:// 下会直接拒绝加载 <script type="module">，app.js 根本不会执行。
+     这里用一个普通脚本兜底：双击 index.html 或模块加载失败时，给出可操作的提示，
+     而不是让人对着一个永远「加载中…」的空画布发呆。 -->
+<div id="boot-fallback" hidden style="position:fixed;inset:0;z-index:9999;place-items:center;background:#0f1210;color:#e8efe8;font:14px/1.7 -apple-system,'Segoe UI','Microsoft YaHei',sans-serif;padding:24px">
+  <div style="max-width:620px;background:#141a15;border:1px solid #2b352c;border-radius:16px;padding:26px 30px;box-shadow:0 24px 70px rgba(0,0,0,.6)">
+    <h2 style="margin:0 0 10px;font-size:19px;color:#5ad26f">这个工具必须通过本地服务器打开</h2>
+    <p style="margin:0 0 12px;color:#c9d6cb">
+      浏览器不允许在 <code style="background:#0e130f;padding:1px 5px;border-radius:5px">file://</code> 下加载 ES Module，
+      所以直接双击 <code style="background:#0e130f;padding:1px 5px;border-radius:5px">index.html</code> 会看到空白页（地图也不会出现）。
+    </p>
+    <p style="margin:0 0 8px;color:#93a394">在工具目录里任选一种方式启动：</p>
+    <pre style="margin:0 0 14px;padding:12px 14px;background:#0b0f0c;border:1px solid #223026;border-radius:10px;color:#d7e6d9;overflow:auto">双击 start.cmd
+或  node server.mjs
+或  npm start</pre>
+    <p style="margin:0;color:#c9d6cb">
+      然后访问 <a href="http://127.0.0.1:5273/" style="color:#5ad26f">http://127.0.0.1:5273/</a>（如果换了端口，用它打印出来的地址）。
+    </p>
+    <p id="boot-fallback-detail" style="margin:14px 0 0;color:#93a394;font-size:12px"></p>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var shown = false;
+    function show(detail) {
+      if (shown || window.__tool || window.__toolBooting) return;
+      shown = true;
+      var box = document.getElementById('boot-fallback');
+      if (!box) return;
+      box.hidden = false;
+      box.style.display = 'grid';
+      var d = document.getElementById('boot-fallback-detail');
+      if (d && detail) d.textContent = detail;
+    }
+    if (location.protocol === 'file:') {
+      show('当前地址是 file:// —— 请按上面的方式启动本地服务器后再访问 http://127.0.0.1:5273/');
+    }
+    window.addEventListener(
+      'error',
+      function (event) {
+        var tag = event && event.target;
+        if (tag && tag.tagName === 'SCRIPT' && /app\.js/.test(String(tag.src || ''))) {
+          show('assets/js/app.js 加载失败（' + (tag.src || '') + '）。');
+        }
+      },
+      true,
+    );
+    setTimeout(function () {
+      show(
+        window.__tool
+          ? ''
+          : '应用脚本没有启动：可能是模块加载失败，或者页面不是通过本地服务器打开的（检查地址栏是否为 http://127.0.0.1:5273/）。',
+      );
+    }, 3500);
+  })();
+</script>
 
 <script type="module" src="assets/js/app.js"></script>
 </body>
 </html>
+
+
