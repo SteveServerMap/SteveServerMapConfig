@@ -278,7 +278,7 @@ async function activateDimension(dimensionId) {
   state.selection.dimensionId = dim.id;
   state.selection.waypointId = null;
   state.selection.groupId = null;
-  state.picks = { a: null, b: null };
+  state.picks = { a: null, b: null, origin: null };
   exitPickMode();
 
   const size = await loadImageFor(dim);
@@ -1065,7 +1065,7 @@ function openCalibrationDialog() {
   const coords = state.coords;
   if (!coords) return toast('站点坐标模块未载入，无法校准', 'error');
 
-  state.picks = { a: null, b: null };
+  state.picks = { a: null, b: null, origin: null };
   const modal = buildCalibrationDialog(dim, coords);
   document.body.appendChild(modal);
 }
@@ -1116,6 +1116,29 @@ function buildCalibrationDialog(dim, coords) {
       </div>
     </div>
     <div data-slot="result" style="margin-top:12px;padding:10px 12px;border-radius:10px;background:#10150f;border:1px solid var(--border,#2b352c);color:var(--muted,#93a394);font-size:12px;font-variant-numeric:tabular-nums">填入两点后自动计算</div>
+
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border,#2b352c)">
+      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+        <b>或者：只指定世界原点 (0,0)</b>
+        <span style="color:var(--muted,#93a394);font-size:12px">知道「哪一格是 (0,0)」+「每方块占几像素」就够了</span>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px">
+        <button data-act="pick-origin" style="padding:7px 12px;border-radius:9px;border:1px solid var(--accent,#5ad26f);background:transparent;color:var(--accent,#5ad26f);cursor:pointer">拾取原点</button>
+        <span data-slot="origin-px" style="color:var(--muted,#93a394);font-variant-numeric:tabular-nums">尚未拾取</span>
+        <label style="display:flex;gap:6px;align-items:center">每方块
+          <input data-slot="origin-scale" type="number" step="any" min="0.001" style="width:84px;padding:6px 8px;border-radius:8px;border:1px solid var(--border,#2b352c);background:#0e130f;color:inherit">
+          像素
+        </label>
+        <label style="display:flex;gap:6px;align-items:center">
+          <input data-slot="origin-flip" type="checkbox"> 南北翻转
+        </label>
+      </div>
+      <div data-slot="origin-result" style="margin-top:10px;padding:10px 12px;border-radius:10px;background:#10150f;border:1px solid var(--border,#2b352c);color:var(--muted,#93a394);font-size:12px;font-variant-numeric:tabular-nums">先拾取原点</div>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px">
+        <button data-act="apply-origin" style="padding:7px 14px;border-radius:9px;border:1px solid var(--accent,#5ad26f);background:transparent;color:var(--accent,#5ad26f);font-weight:600;cursor:pointer" disabled>按原点应用</button>
+      </div>
+    </div>
+
     <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px">
       <button data-act="cancel" style="padding:8px 14px;border-radius:9px;border:1px solid var(--border,#2b352c);background:transparent;color:inherit;cursor:pointer">取消</button>
       <button data-act="apply" style="padding:8px 14px;border-radius:9px;border:1px solid var(--accent,#5ad26f);background:var(--accent,#5ad26f);color:#0b110c;font-weight:600;cursor:pointer" disabled>应用并关闭</button>
@@ -1241,6 +1264,67 @@ function buildCalibrationDialog(dim, coords) {
   }
   recompute();
 
+  /* ---------------- 原点模式：只指定世界 (0,0) 在哪一格 + 每方块像素数 ---------------- */
+
+  // 默认「每方块像素数」取自当前画幅（帧宽 / 世界跨度），新建维度则退化为 1
+  const currentPxPerBlock = () => {
+    const cal = dim.calibration || {};
+    const xMin = Number(cal.xMin);
+    const xMax = Number(cal.xMax);
+    if (Number.isFinite(xMin) && Number.isFinite(xMax) && xMax > xMin) {
+      return dim.imageMeta.width / (xMax - xMin);
+    }
+    return 1;
+  };
+  const scaleEl = slot('origin-scale');
+  if (scaleEl && !scaleEl.value) scaleEl.value = String(Number(currentPxPerBlock().toFixed(4)));
+
+  let originSolved = null;
+
+  const recomputeOrigin = () => {
+    const out = slot('origin-result');
+    const applyOriginBtn = box.querySelector('[data-act="apply-origin"]');
+    const pick = state.picks.origin;
+    const pxPerBlock = Number(slot('origin-scale')?.value);
+    const flip = slot('origin-flip')?.checked === true;
+    const fail = (text) => {
+      out.textContent = text;
+      out.style.color = 'var(--muted, #93a394)';
+      applyOriginBtn.disabled = true;
+      originSolved = null;
+    };
+    if (!pick) return fail('先点「拾取原点」，在地图上点一下世界坐标 (0,0) 的位置');
+    if (!Number.isFinite(pxPerBlock) || pxPerBlock <= 0) {
+      return fail('请填「每方块像素数」：多数离线图是 1，二倍渲染图填 2');
+    }
+    const blocksPerPixel = 1 / pxPerBlock;
+    const W = dim.imageMeta.width;
+    const H = dim.imageMeta.height;
+    const xMin = -pick.px * blocksPerPixel;
+    const xMax = xMin + W * blocksPerPixel;
+    let zMin;
+    let zMax;
+    if (flip) {
+      zMax = pick.py * blocksPerPixel;
+      zMin = zMax - H * blocksPerPixel;
+    } else {
+      zMin = -pick.py * blocksPerPixel;
+      zMax = zMin + H * blocksPerPixel;
+    }
+    originSolved = { xMin, xMax, zMin, zMax, flipZ: flip, pxPerBlock };
+    out.innerHTML =
+      `X：${xMin.toFixed(1)} → ${xMax.toFixed(1)}<br>` +
+      `Z：${zMin.toFixed(1)} → ${zMax.toFixed(1)}<br>` +
+      `<span style="color:var(--muted,#93a394)">每方块 ${pxPerBlock} 像素 · 原点像素 (${Math.round(pick.px)}, ${Math.round(pick.py)})</span>`;
+    out.style.color = 'var(--text, #e8efe8)';
+    applyOriginBtn.disabled = false;
+  };
+
+  scaleEl?.addEventListener('input', recomputeOrigin);
+  scaleEl?.addEventListener('change', recomputeOrigin);
+  slot('origin-flip')?.addEventListener('change', recomputeOrigin);
+  recomputeOrigin();
+
   box.addEventListener('click', (event) => {
     const act = event.target.closest('[data-act]')?.dataset.act;
     if (!act) return;
@@ -1256,6 +1340,34 @@ function buildCalibrationDialog(dim, coords) {
         setPickingUI(false);
         recompute();
       });
+      return;
+    }
+    if (act === 'pick-origin') {
+      state.pickExitHook = () => setPickingUI(false);
+      setPickingUI(true, '(0,0)');
+      beginPick('origin', (point) => {
+        slot('origin-px').textContent = `图片像素 (${Math.round(point.px)}, ${Math.round(point.py)})`;
+        canvas?.setPickPoints?.([state.picks.a, state.picks.b, state.picks.origin].filter(Boolean));
+        setPickingUI(false);
+        recomputeOrigin();
+      });
+      return;
+    }
+    if (act === 'apply-origin' && originSolved) {
+      pushHistory();
+      dim.calibration = {
+        calibrated: true,
+        xMin: Number(originSolved.xMin.toFixed(3)),
+        xMax: Number(originSolved.xMax.toFixed(3)),
+        zMin: Number(originSolved.zMin.toFixed(3)),
+        zMax: Number(originSolved.zMax.toFixed(3)),
+        flipZ: originSolved.flipZ === true,
+        note: `按世界原点 (0,0) · 每方块 ${originSolved.pxPerBlock} 像素 · 图片 ${dim.imageMeta.width}×${dim.imageMeta.height}px · 由配置工具生成`,
+      };
+      canvas?.setPickPoints?.([]);
+      commit({ structural: true });
+      toast('已按原点 (0,0) 设置画幅；记得点「保存到站点」', 'ok', 4000);
+      close();
       return;
     }
     if (act === 'apply' && solved) {
@@ -1562,6 +1674,7 @@ function api2tool() {
     preview: () => openPreview(),
     action: (name) => handleAction(name),
     calibrate: (a, b) => calibrateFromPoints(a, b),
+    setOrigin: (opts) => setOriginCalibration(opts || {}),
 
     /* ---- 额外便利 ---- */
     model,
@@ -1599,6 +1712,32 @@ function api2tool() {
   };
 }
 
+/** 按「世界原点 (0,0) 所在像素 + 每方块像素数」反推画幅（对话框原点模式 / 自动化测试共用） */
+function setOriginCalibration({ px, py, pxPerBlock = 1, flipZ = false } = {}) {
+  const dim = currentDimension();
+  if (!dim || !dim.imageMeta?.width) return { ok: false, error: '缺少维度或图片尺寸' };
+  const blocksPerPixel = 1 / Number(pxPerBlock);
+  if (!Number.isFinite(blocksPerPixel) || blocksPerPixel <= 0) return { ok: false, error: '每方块像素数无效' };
+  const W = dim.imageMeta.width;
+  const H = dim.imageMeta.height;
+  const xMin = -px * blocksPerPixel;
+  const xMax = xMin + W * blocksPerPixel;
+  const zMin = flipZ ? py * blocksPerPixel - H * blocksPerPixel : -py * blocksPerPixel;
+  const zMax = zMin + H * blocksPerPixel;
+  pushHistory();
+  dim.calibration = {
+    calibrated: true,
+    xMin: Number(xMin.toFixed(3)),
+    xMax: Number(xMax.toFixed(3)),
+    zMin: Number(zMin.toFixed(3)),
+    zMax: Number(zMax.toFixed(3)),
+    flipZ: flipZ === true,
+    note: '按世界原点 (0,0) · 每方块 ' + pxPerBlock + ' 像素 · 图片 ' + W + 'x' + H + 'px · 由配置工具生成',
+  };
+  commit({ structural: true });
+  return { ok: true, calibration: dim.calibration };
+}
+
 /** 两点反解并直接应用（与校准对话框同一套数学），供自动化测试/控制台调用 */
 function calibrateFromPoints(a, b) {
   const dim = currentDimension();
@@ -1625,6 +1764,7 @@ function calibrateFromPoints(a, b) {
 }
 
 export { state, api, saveToSite as save };
+
 
 
 

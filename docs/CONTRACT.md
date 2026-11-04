@@ -274,3 +274,12 @@ window.__tool = {
 3. 手填 X/Z 没有 `input` 监听，解算不触发、「应用」永远禁用；
 4. 撤销按字符记录（已合并）；
 5. 维度 id 清空/改名后编辑器找不到当前维度（已按索引兜底）。
+
+### 8.7 原点校准（世界 (0,0) 模式）
+校准对话框除「两点校准」「直接输入画幅」外，还有第三种：只指定世界 (0,0) 所在图片像素 + 每方块像素数。
+- 公式：`blocksPerPixel = 1 / pxPerBlock`；`xMin = -px0 * blocksPerPixel`；`xMax = xMin + W * blocksPerPixel`；
+  `flipZ=false` 时 `zMin = -py0 * blocksPerPixel`、`zMax = zMin + H * blocksPerPixel`；
+  `flipZ=true` 时 `zMax = py0 * blocksPerPixel`、`zMin = zMax - H * blocksPerPixel`。
+- 调试接口：`window.__tool.setOrigin({ px, py, pxPerBlock, flipZ })` 走同一套数学。
+- 注意：`canvas.imageToScreen()` / `worldToScreen()` 返回的是**画布容器内坐标**（不是页面 client 坐标），
+  CDP/自动化里要自己加上 `#canvas-root` 的 `getBoundingClientRect()` 偏移。
