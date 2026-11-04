@@ -20,7 +20,7 @@ node tests/e2e.mjs
 ```
 
 - **退出码 0** = 全部检查通过；**退出码 1** = 有失败项或基础设施起不来。
-- 全过程约 **17 秒**（本次实测 17.6 s）。
+- 全过程约 **19 秒**（本次实测 18.8 s）。
 - 结束时保证：工具服务器已 `taskkill /T /F`、浏览器进程已退出、`%TEMP%` 下的站点副本与草稿目录已删除
   （用 `--keep` 时才保留并打印路径）。
 
@@ -61,8 +61,10 @@ node tests/e2e.mjs
    §7.1 断言 `/api/state` 返回的 `dataDir` 就等于这里传进去的临时目录（本轮实测一致）。
 3. **目标校验**：§7.1 断言 `/api/health` 的 `siteDir` 等于副本路径；一旦发现指向真实仓库立即中止。
 4. **写前闸门**：所有会写 `config.json` 的检查（§7.4/§7.5b/§7.6）在写入前再校验一次「siteDir 不是真实仓库」。
-5. **事后取证**：最后一项检查给真实站点仓库拍快照（`config.json` 的 sha256 + 顶层条目的体积/mtime），
-   跑完比对，证明真实仓库**一个字节都没变**、也没多出备份文件。
+5. **事后观察**：最后一项检查给真实站点仓库拍快照（`config.json` 的 sha256 + 顶层条目的体积/mtime），跑完比对。
+   因为**用户可能同时在用另一个工具实例（默认端口 5273）往真实站点保存**，这一项对「外部改动」只记
+   warning（列出前后 sha256/mtime），不判失败；快照会忽略 `.backups/` 与根目录 `config.json.bak-*` 这类保存副产物。
+   「e2e 自己没写到真实站点」由第 1~4 条硬保证，不依赖这一项。
 6. **清理**：退出前 `taskkill /T /F` 服务器、`launchBrowser().close()` 收浏览器、删除两个临时目录。
 
 §7.8 另外检查「越界写入被拒绝后，站点副本之外没有留下 `evil.png`」。
@@ -78,17 +80,17 @@ node tests/e2e.mjs
 | `c2-page` | §7.2 | **重新导航**后 3 秒内渲染出配置树；console error / 未捕获异常 / HTTP≥400 共 0 条；基底图载入成功 |
 | `c0-visible` | 扩展（可见性回归） | 基底图**真的被画出来**：computed `opacity===1`、class 含 `is-loaded`、尺寸 >50×50、截图亮度 `mean>8` 且 `litRatio>0.05`、`#canvas-info` 含 `W×H` 与图片名 |
 | `c0b-enhance` | 扩展 | 点一次 `#btn-enhance` 只翻转一次（`body[data-enhance]` / `aria-pressed` / `#canvas-image` filter / `localStorage['ssm.enhance.v1']` 同步、再点回原状、不重复绑定） |
-| `c3-tree-count` | §7.3 | `#tree` 里 `[data-waypoint-id]` 数量 = 站点 `config.json` 主世界路径点数（10） |
+| `c3-tree-count` | §7.3 | `#tree` 里 `[data-waypoint-id]` 数量 = 站点 `config.json` 主世界路径点数（**从副本动态读取**，站点配置由用户随时改） |
 | `x1-undo-redo` | 扩展 | 改路径点名称 → `Ctrl+Z` 复原 → `Ctrl+Shift+Z` 再改回（每步读草稿实测） |
 | `c4-calibration` | §7.4 | **全部走真实 UI**：`#btn-calibrate` → 对话框「拾取 A/B」→ CDP 点画布两处 → 填 X/Z → 结果出现 → 应用到草稿 → 保存 → 落盘画幅与站点原画幅误差 < 2 方块 |
-| `c5a-new-waypoint` | §7.5a | 点「新增路径点」→ 画布点一下 → 新点坐标 = 点击处世界坐标 → 表单里能看到这两个坐标 |
-| `c5b-save-verify` | §7.5b | 保存 → 站点 `config.json`：`JSON.parse` 通过、`config.schema.json` 通过、新点在、字段合法、其它维度没被破坏 |
-| `x2-backup` | 扩展 | 保存生成了 `config.json.bak-<时间戳>`，最新备份可解析且内容是保存前的 10 个点 |
-| `c5c-place` | §7.5c | 新增后 `canvas.getMode()==='place'` 且 `#mode-badge` 可见 → 点地图 → 落点误差 ≤1.5 方块 → 模式自动回 `select`、badge 隐藏 |
+| `c5a-new-waypoint` | §7.5a | 点「新增路径点」→ 点「在图上取点」→ place → 画布点一下 → 新点坐标 = 点击处世界坐标 → 表单里能看到这两个坐标 |
+| `c5b-save-verify` | §7.5b | 保存 → 站点 `config.json`：`JSON.parse` 通过、`config.schema.json` 通过、新点在、字段合法、其它维度点数**按站点原配置动态比较** |
+| `x2-backup` | 扩展 | 写前备份落在站点 `.backups/`：`config.json.bak-<时间戳>` 可解析、内容是保存前的点数；站点根目录不再散落 bak |
+| `c5c-place` | §7.5c（交互语义） | 新建后 `mode==='select'`、`placeFor===null`、`#btn-pick-position` 可用；点它 → `place` + badge → 点地图落位（误差 ≤1.5 方块）→ 回 `select`；**点画布空白只取消选中、不移动已选点**；切换选中会自动取消放置 |
 | `c6-save-blocked` | §7.6 | 制造 error（清空维度 id）→ 点保存 → `config.json` 字节不变 + 界面出现错误提示 |
 | `c7-preview` | §7.7 | 加一个**未保存**的点 → 点「真实站点预览」→ `#preview-frame.contentDocument` 里 `#overlay .marker` 数量 = 草稿点数（且多于站点已保存数） |
 | `c8-path-traversal` | §7.8 | `POST /api/import-image` 用 `../evil.png`、`..\evil.png`、`sub/evil.png`、`C:\Windows\Temp\evil.png` 四种写法 → 全部 4xx 且 `ok:false`，目录外无残留 |
-| `x4-real-site-untouched` | 扩展 | 真实站点仓库 sha256 + 顶层条目快照与运行前完全一致 |
+| `x4-real-site-untouched` | 扩展 | 观察真实站点有没有被**本次 e2e** 写入：快照忽略 `.backups/` 与 `config.json.bak-*`；若是外部进程（用户自己的工具实例）改的，**降级为 warning** 并列出前后 sha256/mtime；「e2e 没写到真实站点」由临时副本 + `--data` + 三重 `siteDir` 断言 + 写前闸门保证 |
 
 ---
 
@@ -110,12 +112,13 @@ node tests/e2e.mjs
   `Log.entryAdded(error)`、`Network.responseReceived(status≥400)`，要求 0 条。
 - 顺带断言 `#canvas-image` 的 `naturalWidth > 0`（图片来自 `/preview/<编码后的文件名>`）。
 
-### §7.3 载入站点 `config.json` 后，树里的路径点数量与站点一致（主世界 10 个）
+### §7.3 载入站点 `config.json` 后，树里的路径点数量与站点一致
 
-- 期望值从**站点仓库的 `config.json`** 里读（不写死 10），断言两件事：
+- 期望值从**站点仓库的 `config.json`** 里读（**绝不写死**——站点配置由用户随时改：现在主世界 5 个点、
+  下界/末地各 0 个，脚本都会自动跟着变），断言两件事：
   - 数量相等；
-  - 10 个路径点名字都出现在 `#tree` 文本里（`[data-waypoint-id]` 数量优先，缺失时退化为文本匹配）。
-- 附带记录维度标签出现数（3/3）与分组名出现数（4/4）作为诊断信息（不作为失败条件）。
+  - 路径点名字都出现在 `#tree` 文本里（`[data-waypoint-id]` 数量优先，缺失时退化为文本匹配）。
+- 附带记录维度标签出现数与分组名出现数作为诊断信息（不作为失败条件）。
 
 ### §7.4 「拾取」两点后画幅解算正确（对站点现有画幅误差 < 2 方块）
 
@@ -144,18 +147,25 @@ node tests/e2e.mjs
 
 - `c5a`：
   1. 先把画布放大到 `scale ≥ 1.8`（1 屏幕像素 ≈ 0.55 图片像素；否则 1 px 误差就是 4~5 个方块）；
-  2. 点 `#btn-new-waypoint`，等草稿里多出一个 id；
-  3. 在画布相对位置 (0.42, 0.38) **点一下**（place 模式），等草稿里新点坐标 = 该处世界坐标（±2.5 方块）；
-     若点画布没有落位行为，退化为「把标记拖过去」（真实 pointer 拖拽），最后才用 `__tool.patch`；
+  2. 点 `#btn-new-waypoint`，等草稿里多出一个 id；断言**没有**自动进入 place（新语义）；
+  3. 点顶栏「在图上取点」`#btn-pick-position` → 断言进入 `place` → 在画布相对位置 (0.42, 0.38) **点一下**，
+     等草稿里新点坐标 = 该处世界坐标（±2.5 方块）；落位后断言模式回到 `select`；
+     若这条链路走不通，退化为「把标记拖过去」（真实 pointer 拖拽），最后才用 `__tool.patch`；
   4. 选中该点，断言 `#form` 里同时出现 X、Z 两个数值。
 - `c5b`：点 `#btn-save`（真实按钮），轮询站点副本的 `config.json` 直到主世界点数 +1，然后断言：
   - `JSON.parse` 通过（解析失败会直接抛错）；
   - `config.schema.json` 校验通过（脚本内 draft-07 子集校验器，支持 `type/const/enum/required/properties/items/additionalProperties`）；
   - 新路径点存在、`name` 非空、`x/z` 有限、`group` 在分组表里、坐标与草稿一致；
-  - `version`/`site.title`/下界 2 点/末地 2 点未被破坏（回归）。
-- `c5c`（放置模式）：点 `#btn-new-waypoint` → 断言 `window.__tool.canvas.getMode() === 'place'`、
-  `#mode-badge` 可见且文案含「放置」→ 点地图 → 断言新点坐标与点击处误差 **≤1.5 方块**（本轮 **0.668**）→
-  断言模式回到 `select`、badge 隐藏 → 用 `Ctrl+Z` 撤销回原状（不影响后续用例）。
+  - `version`/`site.title` 不变；**其它维度的点数按站点原配置动态比较**（不再写死下界/末地各 2 个）。
+- `c5c`（交互语义回归，用户反馈后重写）：
+  1. 点 `#btn-new-waypoint` → 断言 `canvas.getMode()==='select'`、`state.placeFor===null`、`#mode-badge` 隐藏、
+     `#btn-pick-position` 可用（新点自动选中）；
+  2. 点 `#btn-pick-position` → 断言 `mode==='place'`、`placeFor === 新点 id`、badge 可见；
+  3. 点地图 → 断言落点误差 **≤1.5 方块**、`mode` 回 `select`、`placeFor` 清空、badge 隐藏；
+  4. **核心回归**：点画布空白处 → 断言已选中的点坐标**一点都没变**、选中被清空、`#btn-pick-position` 变
+     `disabled`（这几种都是预期行为）；
+  5. 切换选中会自动 `disarmPlacement()`：为 A 点进入 place 后选中 B 点 → 断言 `mode==='select'`、`placeFor===null`；
+  6. 用 `Ctrl+Z` 撤销回原状（不影响后续用例）。
 
 ### §7.6 保存前存在 error（例如删掉维度 id）时保存被阻止并提示
 
@@ -195,8 +205,8 @@ node tests/e2e.mjs
      `visibility === 'visible'` 且 `display !== 'none'`、渲染尺寸 > 50×50、`complete && naturalWidth > 0`；
   2. **像素级**：`Page.captureScreenshot({ clip: 图片可见区域 })` 截图 → 用 `node:zlib.inflateSync`
      + 手写反滤波解 PNG（约 70 行，零依赖），统计 `mean` 与 `litRatio`（亮度 >30 的像素占比）。
-     阈值 `mean > 8 && litRatio > 0.05`。实测对照：
-     - 正常显示：`mean = 47.3 / litRatio = 0.233`
+     阈值 `mean > 8 && litRatio > 0.05`。实测对照（正常态会随视口/图片内容小幅浮动）：
+     - 正常显示：`mean = 44.0 ~ 47.3 / litRatio = 0.214 ~ 0.233`
      - 模拟事故（去掉 `is-loaded` → `opacity:0`）：`mean = 16.5 / litRatio = 0.021` → **会被判失败**
      （`litRatio` 是本图的判别式；`mean` 只兜「整块全黑」，因为关掉提亮后暗图本身 mean 也不高）；
   3. **信息条**：`#canvas-info` 不能隐藏，文本必须含 `3584×5120`（即图片天然尺寸）与图片名 `主世界.png`。
@@ -215,29 +225,34 @@ node tests/e2e.mjs
 
 | 时间（本地） | 环境 | 结果 | 耗时 |
 | --- | --- | --- | --- |
-| 2026-11-05 04:02 | Node v24.18.0 · Edge 155 (headless) · Windows | **16 通过 / 0 失败 / 0 跳过 / 0 警告**（退出码 0） | 17.6 s |
+| 2026-11-05 04:32 | Node v24.18.0 · Edge 155 (headless) · Windows | **16 通过 / 0 失败 / 0 跳过 / 0 警告**（退出码 0） | 18.8 s |
+
+> 站点 `config.json` 已被用户改成 **主世界 5 点 / 下界 0 / 末地 0**、画幅也重新校准过；
+> 本轮的期望值全部从站点副本动态读取，所以数字与上一轮不同属于正常。
 
 逐项（与运行时输出一致）：
 
 ```
 ✓ x3-schema-selftest      站点配置 0 错误；坏配置被拒 3 条
 ✓ c1-health               200 · version=1.0.0 · siteDir=临时副本 · dataDir=--data 指定的临时目录
-✓ c2-page                 重新导航后 496 ms 内完成首屏；树渲染 141 ms；console error / 异常 / HTTP≥400：0
-✓ c0-visible              opacity=1、is-loaded ✓、518×740px 显示中；mean=47.3 / litRatio=0.233（阈值 8 / 0.05）
-                          #canvas-info="主世界 · 主世界.png · 3584×5120px"；enhance=1、画布标记 10 个
+✓ c2-page                 重新导航后 464 ms 内完成首屏；树渲染 116 ms；console error / 异常 / HTTP≥400：0
+✓ c0-visible              opacity=1、is-loaded ✓、518×740px 显示中；mean=44.0 / litRatio=0.214（阈值 8 / 0.05）
+                          #canvas-info="主世界 · 主世界.png · 3584×5120px"；enhance=1、画布标记 5 个
 ✓ c0b-enhance             data-enhance 1 → 0 → 1；aria-pressed true→false；filter 变化 ✓；localStorage=0
-✓ c3-tree-count           [data-waypoint-id] 10 个 = 站点 10 个；维度 3/3、分组 4/4
+✓ c3-tree-count           [data-waypoint-id] 5 个 = 站点 config.json 5 个；维度 3/3、分组 2/2
 ✓ x1-undo-redo            改名 → Ctrl+Z 复原 → Ctrl+Shift+Z 再改回（各 1 次）
 ✓ c4-calibration          真实校准对话框：拾取 A/B（命中 #canvas-stage）→ 填 X/Z → 应用 → 保存
-                          落盘 xMin=-1791.249 xMax=1791.192 zMin=-2560.241 zMax=2560.509，最大误差 0.808 方块
-✓ c5a-new-waypoint        新点 X=-29 Z=-44（点击处 -28.966 / -44.032），表单已显示
-✓ c5b-save-verify         主世界 10 → 11 个点；JSON.parse ✓；schema ✓；下界/末地未受影响
-✓ x2-backup               最新备份 config.json.bak-20261105-040155（6474 字节）：JSON.parse ✓、保存前 10 个点；共 2 份备份
-✓ c5c-place               mode='place' + badge 可见 → 落点误差 0.668 方块 ≤1.5 → mode 回 'select'
-✓ c6-save-blocked         注入「维度 id 为空」→ 保存被阻止（6783 字节未变）→ 提示「有 1 个错误，未保存」
-✓ c7-preview              iframe 标记 12 个 = 草稿 12 个（站点已保存 11 个）
+                          落盘 xMin=-2047.749 xMax=1534.692 zMin=-3584.616 zMax=1536.134，最大误差 0.808 方块
+✓ c5a-new-waypoint        点「在图上取点」→ place → 画布点击；新点 wp-6 X=-286 Z=-1068（点击处 -285.966 / -1068.033）
+✓ c5b-save-verify         主世界 5 → 6 个点；JSON.parse ✓；schema ✓；其它维度（nether/the_end）点数未变
+✓ x2-backup               .backups/config.json.bak-20261105-043157（2981 字节）：JSON.parse ✓、保存前 5 个点；
+                          共 2 份备份；站点根目录无散落 bak
+✓ c5c-place               新建后 mode='select'/placeFor=null →「在图上取点」→ mode='place' → 落位误差 0.738 方块 ≤1.5
+                          → 回 'select'；点空白不移动已选点 ✓、取消选中 + 取点按钮 disabled ✓；切换选中自动取消放置 ✓
+✓ c6-save-blocked         注入「维度 id 为空」→ 保存被阻止（3159 字节未变）→ 提示「有 1 个错误，未保存」
+✓ c7-preview              iframe 标记 7 个 = 草稿 7 个（站点已保存 6 个）
 ✓ c8-path-traversal       4 种越界写法全部 400；站点目录外没有 evil.png
-✓ x4-real-site-untouched  真实站点 config.json sha256 不变、14 个顶层条目体积/mtime 全部一致
+✓ x4-real-site-untouched  真实站点 config.json sha256 34b99e3430ff… 不变、14 个顶层条目体积/mtime 全部一致
 ```
 
 `tests/artifacts/` 里当前只保留 `last-run.json`（本轮全部通过，因此没有失败截图）。
@@ -304,6 +319,9 @@ node tests/e2e.mjs
 
 ### 6.7 其它
 
+- **站点 `config.json` 会被用户随时修改**（本轮就变成了主世界 5 点 / 下界 0 / 末地 0，画幅也重新校准过），
+  所以所有期望值都必须**从本次复制出来的副本动态读取**：`ctx.siteCount`、`ctx.dimensionCounts`、
+  `ctx.originalCalibration`、`#canvas-info` 里的尺寸等。新增断言时不要写死「10 个点」「下界 2 个」这类常量。
 - 断言里保留了「按中文文案找按钮」的兜底（如「保存到站点」「真实预览」）；改文案时可能影响兜底路径，
   但 id/data-* 选择器优先级更高（`#btn-*`、`[data-action]`、`[data-field]`、`[data-waypoint-id]`）。
 - 表单类断言只操作 `#form` 内的字段（会校验 `closest('#form')`），不会误写到 `#search` 之类的旁路输入框。
@@ -312,6 +330,14 @@ node tests/e2e.mjs
 - 预览 iframe 加载站点可能需要几秒（3.7 MB 的主世界图），脚本最多等 20 s。
 - 无头模式下 `window.confirm` 会自动被接受（通过 `Page.javascriptDialogOpening`），
   因此「读取站点配置」「删除路径点」这类确认框不会卡住用例；但也意味着**没有覆盖「用户点取消」的分支**。
+- **真实站点可能被外部进程写入**：用户可能同时开着默认端口（5273）的工具实例并在保存。
+  `x4-real-site-untouched` 因此只做「观察」：快照忽略 `.backups/` 与 `config.json.bak-*`，
+  `config.json` 变了就记 warning（附前后 sha256/mtime），不判失败。
+  真正防「e2e 写真实站点」的是：临时副本 + `--data` 隔离 + `/api/health.siteDir`、`/api/state.dataDir`
+  三重断言 + 每次写前的 `assertSafeWriteTarget()`。因此**不要**把这项的 warning 当成可以无视的噪音。
+- 备份位置由站点根目录改为 **`.backups/`** 子目录（服务端只留最近 10 份，`config.json.bak-<时间戳>`），
+  站点仓库 `.gitignore` 已忽略 `.backups/`、`config.json.bak-*`、`*.bak-*`；`x2-backup` 会检查
+  「`.backups/` 里有备份」且「站点根目录没有散落 bak」两条。
 - 已知产品缺陷（**不阻塞验收，但建议修**）：把维度 `id` 改成空串后，`app.js` 的 `handlePatch()` 依赖
   `currentDimension()`（靠 `selection.dimensionId` 定位），此时找不到维度就直接 `return`，
   导致用户**无法再把 id 改回来**，只能点「读取站点配置」重载。e2e 在 §7.6 之后用
@@ -370,3 +396,4 @@ node tests/e2e.mjs
 | 6 | 「新增路径点」后点画布不会落位（`onEmptyClick` 里没有放置逻辑），§7.5「画布点一下」只能退化到拖拽 | 新增 `place` 模式：`armPlacement()` 设 `canvas.setMode('place')` + `#mode-badge` 提示，点地图调用 `placeAt()`，落位后自动回 `select`（对应 `c5c-place`） |
 | 7 | 把维度 `id` 改空后 UI 再也改不回来（`handlePatch` 用 `currentDimension()` 定位维度，找不到就 `return`） | **尚未修复**，e2e 在 §7.6 之后自行修复现场并打警告/留痕；建议改用表单的 `data-entity-id` / `data-dimension-id` 定位（见 6.7） |
 | 8 | **地图图片在 DOM 里、尺寸/坐标全对，但屏幕上永远不显示**：`tool.css` 写的是 `.canvas-image{opacity:0}` + `.canvas-image.is-loaded{opacity:1}`，而 `canvas.js` 的 `setImage` 从没加 `is-loaded` 类 → computed `opacity` 恒为 0。**当时 14 项断言全绿**，因为只查了 `naturalWidth` / `getBoundingClientRect` / 标记 `transform`——这些在 `opacity:0` 时全都正常 | `canvas.js` 的 `onLoad` 里补 `img.classList.add('is-loaded')` + `img.style.opacity='1'`；e2e 新增 `c0-visible`（opacity/`is-loaded`/尺寸硬性断言 + **截图像素亮度** `mean/litRatio` + `#canvas-info` 文本含 `3584×5120`）与 `c0b-enhance`（提亮按钮一次点击只翻转一次）。像素断言用「运行时去掉 `is-loaded`」复现验证：`mean 47.3→16.5`、`litRatio 0.233→0.021`，确认会失败 |
+| 9 | **交互语义缺陷（用户反馈）**：① 新建路径点会自动 `armPlacement()` 且切换选中不取消 → 用户点了 A 再去点地图，就把 A「悄悄挪走」了；② `activateDimension/commit` 从没同步 `state.projection`（app 侧一直 null）→「在图上取点」被误判不可用、坐标读数与列表定位失效 | 改为显式语义：点路径点=只选中（`mode==='select'`、`placeFor===null`）；新建不再自动 place；要落位就点顶栏 `#btn-pick-position`（未选中时 disabled）→ place → 点地图；切换选中自动 `disarmPlacement()`、Esc 可取消；`__tool` 增加 `pickPosition()/armPlacement()/disarmPlacement()`。e2e 的 `c5c-place` 按新语义重写，并新增两条核心回归：**点画布空白不移动已选点**、**切换选中自动取消放置** |

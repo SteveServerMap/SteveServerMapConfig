@@ -5,7 +5,7 @@
  * 覆盖 docs/CONTRACT.md §7 的 8 条验收标准，外加 8 项加固检查（共 16 项）：
  *   §7.1 server 启动 + GET /api/health 200
  *   §7.2 3 秒内渲染出配置树，无 console error / 未捕获异常 / HTTP≥400
- *   §7.3 树里的路径点数量与站点 config.json 一致（主世界 10 个）
+ *   §7.3 树里的路径点数量与站点 config.json 一致（数量动态读取，站点配置由用户随时改）
  *   §7.4 两点校准解算误差 < 2 方块
  *   §7.5 新增路径点 → 画布交互 → 坐标进表单 → 保存 → 站点 config.json 合法
  *   §7.6 存在 error 时保存被阻止并提示
@@ -319,12 +319,18 @@ function hashFile(file) {
   return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
-/** 给目录拍快照（只到第一层 + config.json 的 sha256），用于证明真实站点没被动过 */
-async function snapshotDir(dir, { ignore = ['.git', '.github'] } = {}) {
+/**
+ * 给目录拍快照（第一层 + config.json 的 sha256/mtime），用于观察真实站点有没有被改动。
+ *
+ * 默认忽略：`.git` / `.github`（git 自身会动）、`.backups/`（配置工具的写前备份目录）、
+ * 以及根目录的 `config.json.bak-*`（旧版散落的备份）——这些是保存副产物，不代表「有人改了配置」。
+ */
+async function snapshotDir(dir, { ignore = ['.git', '.github', '.backups'], ignorePattern = /^config\.json\.bak-/ } = {}) {
   const entries = await fsp.readdir(dir, { withFileTypes: true });
   const items = [];
   for (const entry of entries) {
     if (ignore.includes(entry.name)) continue;
+    if (ignorePattern && ignorePattern.test(entry.name)) continue;
     const full = path.join(dir, entry.name);
     const stat = await fsp.stat(full);
     items.push({
@@ -336,7 +342,12 @@ async function snapshotDir(dir, { ignore = ['.git', '.github'] } = {}) {
   }
   items.sort((a, b) => a.name.localeCompare(b.name));
   const configPath = path.join(dir, 'config.json');
-  return { items, configHash: fs.existsSync(configPath) ? hashFile(configPath) : null };
+  const configStat = fs.existsSync(configPath) ? await fsp.stat(configPath) : null;
+  return {
+    items,
+    configHash: configStat ? hashFile(configPath) : null,
+    configMtime: configStat ? configStat.mtime.toISOString() : null,
+  };
 }
 
 /* ========================================================================== *
@@ -1074,49 +1085,65 @@ async function selectWaypoint(ctx, { id, name }) {
   const clickInfo = await page.evalFn((nameText, idText) => {
     const tree = document.querySelector('#tree');
     if (!tree) return null;
+    const treeRect = tree.getBoundingClientRect();
+    const measure = (el, how) => {
+      if (!el) return null;
+      el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      const r = el.getBoundingClientRect();
+      if (r.width <= 1 || r.height <= 1) return null;
+      // 必须落在树的可见区域内，否则点出去会打到别的地方（甚至画布）
+      const inside =
+        r.top >= treeRect.top - 2 && r.bottom <= treeRect.bottom + 2 && r.left >= treeRect.left - 2 && r.right <= treeRect.right + 2;
+      if (!inside) return null;
+      return { how, cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
+    };
     if (idText) {
       const byId = tree.querySelector(`[data-waypoint-id="${String(idText).replace(/"/g, '\\"')}"]`);
-      if (byId) {
-        const r = byId.getBoundingClientRect();
-        if (r.width > 1 && r.height > 1) return { how: '[data-waypoint-id]', cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
-      }
+      const info = measure(byId, '[data-waypoint-id]');
+      if (info) return info;
     }
     if (!nameText) return null;
     const nodes = Array.from(tree.querySelectorAll('*')).filter((el) => {
       if (['svg', 'path', 'use', 'symbol'].includes(el.tagName.toLowerCase())) return false;
-      const r = el.getBoundingClientRect();
-      return r.width > 1 && r.height > 1 && (el.textContent || '').includes(nameText);
+      return (el.textContent || '').includes(nameText);
     });
     nodes.sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
-    const el = nodes[0];
-    if (!el) return null;
-    const r = el.getBoundingClientRect();
-    return { how: '树节点文本', cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
+    for (const el of nodes) {
+      const info = measure(el, '树节点文本');
+      if (info) return info;
+    }
+    return null;
   }, name, id);
+
+  const selectionNow = () =>
+    page.evalFn((wpId) => {
+      const st = window.__tool && typeof window.__tool.state === 'function' ? window.__tool.state() : null;
+      return st && st.selection ? st.selection.waypointId ?? null : null;
+    }, id);
 
   let how = null;
   if (clickInfo) {
     await page.click(clickInfo.cx, clickInfo.cy);
-    await page.settle(160);
+    await page.settle(180);
     how = `点击树节点（${clickInfo.how}）`;
+    if (String(await selectionNow()) === String(id)) return { how, selected: true };
   }
 
-  // 校验选中结果：表单里应出现该路径点的名字
-  const selected = await page.evalFn((nameText) => {
-    const nodes = Array.from(document.querySelectorAll('#form input, #form textarea'));
-    return nodes.some((el) => String(el.value) === String(nameText));
-  }, name);
-  if (selected) return { how, formHasName: true };
-
+  // 兜底：直接走 app 的 select()（与点树节点同一条代码路径）
   const via = await page.evalFn((dimId, wpId) => {
     const tool = window.__tool;
     if (!tool || typeof tool.select !== 'function') return { ok: false };
     tool.select({ dimensionId: dimId, waypointId: wpId, groupId: null });
     return { ok: true };
   }, ctx.dimensionId, id);
-  if (!via?.ok) throw new Error(`无法选中路径点「${name}」（树里点不到，__tool.select 也不可用）`);
-  await page.settle(200);
-  return { how: `__tool.select（${how ? '树节点点击未让表单显示该点' : '树里找不到该路径点'}）`, formHasName: true };
+  assert(via?.ok, `无法选中路径点「${name}」：树里点不到（${how || '未找到节点'}），__tool.select 也不可用`);
+  await page.settle(220);
+  const after = await selectionNow();
+  assert(
+    String(after) === String(id),
+    `选中路径点「${name}」失败：selection.waypointId 实际 ${JSON.stringify(after)} vs 期望 ${JSON.stringify(String(id))}（点击方式：${how || '无'}）`,
+  );
+  return { how: `__tool.select（${how || '树里找不到该点'}）`, selected: true };
 }
 
 /** 选中某个维度（优先点 #dimension-tabs，退化为 __tool.select） */
@@ -2293,6 +2320,10 @@ async function checkPlaceMode(ctx) {
   await selectWaypoint(ctx, { id: newId, name: String(wp.name) });
   const afterSwitch = await readCanvasMode(page);
   assert(
+    String(afterSwitch.selection?.waypointId ?? '') === newId,
+    `切换选中失败：selection.waypointId 实际 ${JSON.stringify(afterSwitch.selection?.waypointId)} vs 期望 ${JSON.stringify(newId)}`,
+  );
+  assert(
     afterSwitch.mode === 'select' && afterSwitch.placeFor === null,
     `切换选中后应自动取消放置：实际 mode=${JSON.stringify(afterSwitch.mode)} placeFor=${JSON.stringify(afterSwitch.placeFor)} vs 期望 'select'/null`,
   );
@@ -2374,41 +2405,69 @@ async function checkSaveVerify(ctx) {
     `保存后的 config.json 没通过 config.schema.json（${schemaErrors.length} 条）：${schemaErrors.slice(0, 4).join('；')}`,
   );
 
-  // ④ 其他维度 / 站点字段没被破坏
-  assert(waypointsOf(config, 'nether').length === 2, `下界路径点数 实际 ${waypointsOf(config, 'nether').length} vs 期望 2`);
-  assert(waypointsOf(config, 'the_end').length === 2, `末地路径点数 实际 ${waypointsOf(config, 'the_end').length} vs 期望 2`);
+  // ④ 其他维度 / 站点字段没被破坏（期望值一律从站点副本的 config.json 动态读，不写死）
+  const expectedCounts = ctx.dimensionCounts || {};
+  for (const [otherDimId, expected] of Object.entries(expectedCounts)) {
+    if (otherDimId === String(ctx.dimensionId)) continue; // 主世界会 +1，单独校验
+    const actual = waypointsOf(config, otherDimId).length;
+    assert(actual === expected, `${otherDimId} 路径点数 实际 ${actual} vs 期望 ${expected}（站点原配置）`);
+  }
+  const mainExpected = (expectedCounts[ctx.dimensionId] ?? ctx.siteCount) + 1;
+  assert(
+    waypointsOf(config).length === mainExpected,
+    `主世界路径点数 实际 ${waypointsOf(config).length} vs 期望 ${mainExpected}（站点原 ${mainExpected - 1} + 新增 1）`,
+  );
   assert(config.version === 1, `version 实际 ${JSON.stringify(config.version)} vs 期望 1`);
   assert(config.site?.title === ctx.siteTitle, `site.title 实际 ${JSON.stringify(config.site?.title)} vs 期望 ${JSON.stringify(ctx.siteTitle)}`);
 
   ctx.flags.saved = true;
   ctx.savedStats = { count: waypointsOf(config).length, bytes: saved.bytes, howSave };
-  return `${howSave}；主世界 ${beforeCount} → ${waypointsOf(config).length} 个点；JSON.parse ✓；新点 ${wp.id} X=${fmt(wp.x)} Z=${fmt(wp.z)}；schema ✓；下界/末地未受影响`;
+  return `${howSave}；主世界 ${beforeCount} → ${waypointsOf(config).length} 个点；JSON.parse ✓；新点 ${wp.id} X=${fmt(wp.x)} Z=${fmt(wp.z)}；schema ✓；其它维度（${Object.keys(expectedCounts).filter((d) => d !== ctx.dimensionId).join('/') || '无'}）点数未变`;
 }
 
 /* ------------------------------ 扩展：备份文件 ------------------------------ */
 
+/**
+ * 保存的写前备份现在落在站点仓库的 `.backups/` 子目录（服务端只保留最近 10 份），
+ * 备份名仍是 `config.json.bak-<时间戳>`；站点根目录不再散落 bak 文件。
+ */
 async function checkBackup(ctx) {
-  const entries = await fsp.readdir(ctx.siteDir);
+  const backupDir = path.join(ctx.siteDir, '.backups');
+  assert(
+    fs.existsSync(backupDir),
+    `站点副本里没有 .backups/ 目录（保存应把写前备份放到这里；当前根目录文件：${(await fsp.readdir(ctx.siteDir)).join('、')}）`,
+  );
+
+  const entries = await fsp.readdir(backupDir);
   const backups = entries
     .filter((name) => /^config\.json\.bak-/.test(name))
-    .map((name) => ({ name, file: path.join(ctx.siteDir, name) }))
+    .map((name) => ({ name, file: path.join(backupDir, name) }))
     .sort((a, b) => (a.name < b.name ? 1 : -1));
   assert(
     backups.length > 0,
-    `站点副本目录里没有 config.json.bak-*（实际文件：${entries.filter((n) => n.includes('config')).join('、') || '无'}）`,
+    `.backups/ 里没有 config.json.bak-*（实际文件：${entries.join('、') || '空'}）`,
   );
+
   const latest = backups[0];
   const text = await fsp.readFile(latest.file, 'utf8');
   let parsed = null;
   try {
     parsed = JSON.parse(text.replace(/^\uFEFF/, ''));
   } catch (error) {
-    throw new Error(`最新的备份 ${latest.name} 不是合法 JSON：${error.message}`);
+    throw new Error(`最新的备份 .backups/${latest.name} 不是合法 JSON：${error.message}`);
   }
   const count = waypointsOf(parsed).length;
   assert(Array.isArray(parsed.dimensions), `备份 ${latest.name} 缺少 dimensions`);
-  assert(count === ctx.siteCount, `备份 ${latest.name} 的主世界路径点数 实际 ${count} vs 期望 ${ctx.siteCount}（保存前的站点配置）`);
-  return `最新备份 ${latest.name}（${Buffer.byteLength(text)} 字节）：JSON.parse ✓、主世界 ${count} 个点（保存前状态）；共 ${backups.length} 份备份`;
+  assert(
+    count === ctx.siteCount,
+    `备份 ${latest.name} 的主世界路径点数 实际 ${count} vs 期望 ${ctx.siteCount}（本次保存前的站点配置）`,
+  );
+
+  // 备份不再散落在站点根目录（防回归）
+  const rootBackups = (await fsp.readdir(ctx.siteDir)).filter((name) => /^config\.json\.bak-/.test(name));
+  assert(rootBackups.length === 0, `站点根目录不应再有 config.json.bak-*，实际还有：${rootBackups.join('、')}`);
+
+  return `.backups/${latest.name}（${Buffer.byteLength(text)} 字节）：JSON.parse ✓、主世界 ${count} 个点（保存前状态）；共 ${backups.length} 份备份；根目录无散落 bak`;
 }
 
 /* ------------------------------ §7.6 保存被阻止 ------------------------------ */
@@ -2762,35 +2821,52 @@ async function checkPathTraversal(ctx) {
   return `4 种越界写法全部 4xx：${detail}；站点目录外没有 evil.png`;
 }
 
-/* ------------------------------ 扩展：真实站点仓库没被碰过 ------------------------------ */
+/* ------------------------------ 扩展：真实站点仓库没被「本次 e2e」写过 ------------------------------ */
 
+/**
+ * 这一项只负责**观察**，不负责判死：
+ *   - 快照忽略 `.backups/` 与根目录 `config.json.bak-*`（配置工具的保存副产物）；
+ *   - 真实站点可能同时被用户正在运行的工具实例（默认端口 5273）写入，那种改动与本轮 e2e 无关，
+ *     所以 **降级为 warning**，并列出前后 sha256 与 mtime；
+ *   - 「e2e 自己没写到真实站点」由更硬的保证承担：临时副本 + `--data` 隔离 +
+ *     `/api/health.siteDir`、`/api/state.dataDir` 三重断言 + 每次写前的 assertSafeWriteTarget()。
+ */
 async function checkRealSiteUntouched(ctx) {
   const before = ctx.realSiteSnapshot;
-  assert(before, 'preflight 没有给真实站点拍照，无法证明没被改过');
+  assert(before, 'preflight 没有给真实站点拍照，无法比对');
   const after = await snapshotDir(OPT.siteRepo);
+  const short = (hash) => (hash ? `${String(hash).slice(0, 12)}…` : 'null');
 
-  assert(
-    after.configHash === before.configHash,
-    `真实站点 config.json 被改写了！sha256 实际 ${String(after.configHash).slice(0, 16)}… vs 运行前 ${String(before.configHash).slice(0, 16)}…`,
-  );
+  const diffs = [];
+  if (after.configHash !== before.configHash) {
+    diffs.push(`config.json sha256 ${short(before.configHash)} → ${short(after.configHash)}（mtime ${before.configMtime} → ${after.configMtime}）`);
+  }
 
   const beforeNames = new Map(before.items.map((item) => [item.name, item]));
   const afterNames = new Map(after.items.map((item) => [item.name, item]));
   const added = after.items.filter((item) => !beforeNames.has(item.name)).map((item) => item.name);
   const missing = before.items.filter((item) => !afterNames.has(item.name)).map((item) => item.name);
-  assert(added.length === 0, `真实站点仓库里多出了文件/目录：${added.join('、')}`);
-  assert(missing.length === 0, `真实站点仓库里少了文件/目录：${missing.join('、')}`);
-
+  if (added.length) diffs.push(`新增：${added.join('、')}`);
+  if (missing.length) diffs.push(`减少：${missing.join('、')}`);
   const changed = after.items.filter((item) => {
     const old = beforeNames.get(item.name);
     return old && (old.size !== item.size || old.mtimeMs !== item.mtimeMs);
   });
-  assert(
-    changed.length === 0,
-    `真实站点仓库里有文件被改动：${changed.map((item) => `${item.name}（${beforeNames.get(item.name).size}→${item.size} 字节）`).join('、')}`,
-  );
+  if (changed.length) {
+    diffs.push(`改动：${changed.map((item) => `${item.name}（${beforeNames.get(item.name).size}→${item.size} 字节）`).join('、')}`);
+  }
 
-  return `真实站点 ${OPT.siteRepo} 无改动：config.json sha256 ${String(before.configHash).slice(0, 12)}… 不变、${after.items.length} 个顶层条目的体积/mtime 全部一致`;
+  if (diffs.length === 0) {
+    return `真实站点 ${OPT.siteRepo} 无改动：config.json sha256 ${short(before.configHash)} 不变、${after.items.length} 个顶层条目的体积/mtime 全部一致（已忽略 .backups/ 与 config.json.bak-*）`;
+  }
+
+  // 外部进程（通常是用户自己的工具实例）改的 → 警告，不判失败
+  ctx.report.warn(
+    '真实站点在本次运行期间被外部进程修改（可能是用户正在使用配置工具），已忽略',
+    diffs.join('；'),
+  );
+  return `真实站点有外部改动（已降级为警告，非 e2e 写入）：${truncate(diffs.join('；'), 220)}；` +
+    `本次 e2e 的写入目标始终是临时副本（siteDir=${truncate(ctx.siteDir, 80)}）`;
 }
 
 /* ========================================================================== *
@@ -2907,17 +2983,17 @@ const CHECKS = [
   { id: 'c2-page', label: '§7.2 3 秒内渲染配置树，无 console error / 异常 / HTTP≥400', requires: ['browser'], run: checkPageRender, setsFlag: 'page' },
   { id: 'c0-visible', label: '扩展：基底图真的被绘制出来（opacity/is-loaded + 像素亮度 + #canvas-info）', requires: ['page'], run: checkCanvasVisible },
   { id: 'c0b-enhance', label: '扩展：提亮按钮一次点击只翻转一次（data-enhance / filter / localStorage）', requires: ['page'], run: checkEnhanceToggle },
-  { id: 'c3-tree-count', label: '§7.3 树里的路径点数量 = 站点主世界 10 个', requires: ['page'], run: checkTreeCount },
+  { id: 'c3-tree-count', label: '§7.3 树里的路径点数量 = 站点 config.json 主世界点数（动态读取）', requires: ['page'], run: checkTreeCount },
   { id: 'x1-undo-redo', label: '扩展：撤销 / 重做（Ctrl+Z / Ctrl+Shift+Z）', requires: ['page'], run: checkUndoRedo },
   { id: 'c4-calibration', label: '§7.4 两点校准解算误差 < 2 方块（并落盘）', requires: ['page'], run: checkCalibration, setsFlag: 'calibrated' },
   { id: 'c5a-new-waypoint', label: '§7.5a 新增路径点 → 画布交互 → 坐标出现在表单', requires: ['page'], run: checkNewWaypoint, setsFlag: 'waypointAdded' },
   { id: 'c5b-save-verify', label: '§7.5b 保存 → 站点 config.json：JSON.parse + schema + 新点存在', requires: ['waypointAdded'], run: checkSaveVerify, setsFlag: 'saved' },
-  { id: 'x2-backup', label: '扩展：保存生成 config.json.bak-* 备份且可解析', requires: ['saved'], run: checkBackup },
-  { id: 'c5c-place', label: '§7.5c 放置模式：place → 点地图 → 坐标落位 → 回到 select', requires: ['page'], run: checkPlaceMode },
+  { id: 'x2-backup', label: '扩展：保存把写前备份写到 .backups/（JSON 可解析、点数正确、根目录无散落 bak）', requires: ['saved'], run: checkBackup },
+  { id: 'c5c-place', label: '§7.5c 交互语义：新建=select →「在图上取点」→ place → 落位回 select；点空白不移动已选点', requires: ['page'], run: checkPlaceMode },
   { id: 'c6-save-blocked', label: '§7.6 存在 error 时保存被阻止并提示', requires: ['saved'], run: checkSaveBlocked },
   { id: 'c7-preview', label: '§7.7 预览 iframe 渲染出「草稿」路径点数量', requires: ['page'], run: checkPreview },
   { id: 'c8-path-traversal', label: '§7.8 越界写入（../evil.png 等）返回 4xx', requires: ['server'], run: checkPathTraversal },
-  { id: 'x4-real-site-untouched', label: '扩展：真实站点仓库全程未被修改（sha256 + 目录快照对比）', requires: [], run: checkRealSiteUntouched },
+  { id: 'x4-real-site-untouched', label: '扩展：真实站点未被本次 e2e 写入（外部用户的改动降级为警告）', requires: [], run: checkRealSiteUntouched },
 ];
 
 async function main() {
