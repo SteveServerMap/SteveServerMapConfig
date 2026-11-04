@@ -1,0 +1,13 @@
+# 工具运行时产物
+.data/
+*.bak-*
+
+# 测试产物（截图/报告）
+tests/artifacts/*
+!tests/artifacts/.gitignore
+
+# 系统垃圾
+Thumbs.db
+desktop.ini
+.DS_Store
+node_modules/

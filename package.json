@@ -1,0 +1,24 @@
+{
+  "name": "steveservermap-config",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SteveServerMap.github.io 的本地配置与预览工具：编辑维度/路径点/分组/画幅校准，用真实站点预览，并写回 config.json。",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/model.test.mjs",
+    "e2e": "node tests/e2e.mjs"
+  },
+  "dependencies": {},
+  "keywords": [
+    "minecraft",
+    "map",
+    "config",
+    "offline",
+    "github-pages"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Steve Server 地图配置工具</title>
+<meta name="description" content="SteveServerMap.github.io 的本地配置与预览工具：编辑维度、路径点、分组与画幅校准，实时用真实站点预览，并写回 config.json。">
+<link rel="stylesheet" href="assets/css/tool.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1210'/%3E%3Cpath d='M8 20h16v3H8z' fill='%235ad26f'/%3E%3Ccircle cx='16' cy='11' r='4' fill='%235ad26f'/%3E%3C/svg%3E">
+</head>
+<body data-mode="select">
+
+<div id="app" class="app">
+
+  <!-- ============================ 顶栏 ============================ -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wrench"></use></svg>
+      </span>
+      <div class="brand-text">
+        <h1 class="brand-title">地图配置工具</h1>
+        <p id="draft-meta" class="brand-sub">正在加载…</p>
+      </div>
+    </div>
+
+    <div id="toolbar" class="toolbar">
+      <div class="toolbar-group">
+        <button id="btn-undo" class="btn ghost icon-only" type="button" title="撤销 (Ctrl+Z)" aria-label="撤销">
+          <svg class="icon"><use href="#i-undo"></use></svg>
+        </button>
+        <button id="btn-redo" class="btn ghost icon-only" type="button" title="重做 (Ctrl+Shift+Z)" aria-label="重做">
+          <svg class="icon"><use href="#i-redo"></use></svg>
+        </button>
+      </div>
+      <div class="toolbar-sep" aria-hidden="true"></div>
+      <div class="toolbar-group">
+        <button id="btn-import-config" class="btn ghost" type="button" title="从站点仓库重新读取 config.json（会丢弃未保存修改）">
+          <svg class="icon"><use href="#i-download"></use></svg><span>读取站点配置</span>
+        </button>
+        <button id="btn-export-json" class="btn ghost" type="button" title="把当前草稿下载为 config.json">
+          <svg class="icon"><use href="#i-export"></use></svg><span>导出 JSON</span>
+        </button>
+      </div>
+      <div class="toolbar-sep" aria-hidden="true"></div>
+      <div class="toolbar-group">
+        <button id="btn-preview" class="btn ghost" type="button" title="用真实站点预览当前配置">
+          <svg class="icon"><use href="#i-eye"></use></svg><span>真实站点预览</span>
+        </button>
+        <button id="btn-save" class="btn primary" type="button" title="写入站点仓库的 config.json">
+          <svg class="icon"><use href="#i-save"></use></svg><span>保存到站点</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============================ 主区域 ============================ -->
+  <main class="body">
+
+    <!-- 左：配置树 -->
+    <aside class="panel panel-left" aria-label="配置树">
+      <div class="panel-head">
+        <h2 class="panel-title">配置</h2>
+        <span id="status" class="status-chip" data-tone="info">加载中…</span>
+      </div>
+
+      <div id="dimension-tabs" class="dimension-tabs" role="tablist" aria-label="维度"></div>
+
+      <div class="search-row">
+        <svg class="icon search-icon" aria-hidden="true"><use href="#i-search"></use></svg>
+        <input id="search" class="search-input" type="search" placeholder="搜索路径点 / 坐标…" autocomplete="off" spellcheck="false">
+      </div>
+
+      <div id="tree" class="tree" role="tree" aria-label="维度 / 分组 / 路径点"></div>
+
+      <section class="issues-wrap" aria-label="问题面板">
+        <div class="panel-head small">
+          <h3 class="panel-title">检查结果</h3>
+          <span id="issues-count" class="badge" hidden>0</span>
+        </div>
+        <div id="issues" class="issues"></div>
+      </section>
+    </aside>
+
+    <!-- 中：编辑画布 -->
+    <section class="canvas-area" aria-label="地图画布">
+      <div id="canvas-root" class="canvas-root" tabindex="0">
+        <div id="canvas-stage" class="canvas-stage">
+          <img id="canvas-image" class="canvas-image" alt="" draggable="false">
+        </div>
+        <div id="canvas-overlay" class="canvas-overlay"></div>
+        <div id="canvas-empty" class="canvas-empty" hidden></div>
+        <div id="mode-badge" class="mode-badge" hidden></div>
+        <div id="coord-readout" class="coord-readout" hidden>X — Z —</div>
+        <div class="zoom-panel" role="group" aria-label="缩放">
+          <button id="zoom-in" class="zoom-btn" type="button" aria-label="放大" title="放大 (+)">
+            <svg class="icon"><use href="#i-plus"></use></svg>
+          </button>
+          <div id="zoom-level" class="zoom-level">100%</div>
+          <button id="zoom-out" class="zoom-btn" type="button" aria-label="缩小" title="缩小 (−)">
+            <svg class="icon"><use href="#i-minus"></use></svg>
+          </button>
+          <button id="btn-fit" class="zoom-btn" type="button" aria-label="整图" title="缩放至整张地图">
+            <svg class="icon"><use href="#i-fit"></use></svg>
+          </button>
+        </div>
+        <div id="canvas-hint" class="canvas-hint">
+          滚轮缩放 · 拖拽平移 · 双击放大 · 从左侧选路径点后可直接拖动
+        </div>
+      </div>
+    </section>
+
+    <!-- 右：属性表单 -->
+    <aside class="panel panel-right" aria-label="属性">
+      <div class="panel-head">
+        <h2 id="form-title" class="panel-title">属性</h2>
+        <span id="form-subtitle" class="panel-sub"></span>
+      </div>
+      <div id="form" class="form"></div>
+    </aside>
+  </main>
+
+  <!-- ============================ 页脚 ============================ -->
+  <footer class="app-footer">
+    <span id="footer-site" class="footer-text">站点目录：—</span>
+    <span class="footer-sep" aria-hidden="true">·</span>
+    <span id="footer-hint" class="footer-text muted">编辑后自动保存草稿；「保存到站点」才会写入 config.json</span>
+  </footer>
+</div>
+
+<!-- ============================ 预览弹层 ============================ -->
+<div id="preview-dialog" class="modal" hidden role="dialog" aria-modal="true" aria-label="真实站点预览">
+  <div class="modal-panel wide">
+    <header class="modal-head">
+      <h2 class="modal-title">
+        <svg class="icon"><use href="#i-eye"></use></svg>
+        真实站点预览（读取当前草稿）
+      </h2>
+      <div class="modal-head-actions">
+        <button id="btn-preview-reload" class="btn ghost small" type="button" title="重新加载预览">
+          <svg class="icon"><use href="#i-refresh"></use></svg><span>刷新</span>
+        </button>
+        <button id="btn-preview-close" class="icon-btn" type="button" aria-label="关闭">
+          <svg class="icon"><use href="#i-close"></use></svg>
+        </button>
+      </div>
+    </header>
+    <div class="modal-body-iframe">
+      <iframe id="preview-frame" class="preview-frame" title="站点预览"></iframe>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ 隐藏的文件选择器 ============================ -->
+<input id="file-image" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+<input id="file-config" type="file" accept=".json,application/json" hidden>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<!-- ============================ 图标精灵 ============================ -->
+<svg class="icon-sprite" aria-hidden="true" focusable="false" width="0" height="0">
+  <defs>
+    <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a4.5 4.5 0 006.3 5.4l-1.6 1.6-1.4-1.4"/><path d="M4 20l8.5-8.5"/><path d="M13 5.5l5.5 5.5"/><circle cx="17.5" cy="6.5" r="3"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 7L4 12l5 5"/><path d="M4 12h9a6 6 0 010 12"/></symbol>
+    <symbol id="i-redo" viewBox="0 0 24 24"><path d="M15 7l5 5-5 5"/><path d="M20 12h-9a6 6 0 000 12"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 12l5 5 5-5"/><path d="M5 20h14"/></symbol>
+    <symbol id="i-export" viewBox="0 0 24 24"><path d="M12 16V5M7 9l5-5 5 5"/><path d="M5 20h14"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4"/><path d="M8 15h8"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-2.3-5.7"/><path d="M20 4v5h-5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-fit" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 21s7-6.3 7-11a7 7 0 10-14 0c0 4.7 7 11 7 11z"/><circle cx="12" cy="10" r="2.6"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6"/><path d="M21 16l-5-5-6 6"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 6.5A2.5 2.5 0 0012.5 4H6a2 2 0 00-2 2v6.5A2.5 2.5 0 006.5 15"/></symbol>
+    <symbol id="i-plus-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v8M8 12h8"/></symbol>
+    <symbol id="i-warning" viewBox="0 0 24 24"><path d="M12 3.5l9 16H3z"/><path d="M12 9v5M12 17h.01"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M4 12.5l5 5L20 6.5"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2.5h8a2 2 0 012 2V18a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9.5 5l7 7-7 7"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><path d="M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16"/></symbol>
+  </defs>
+</svg>
+
+<script type="module" src="assets/js/app.js"></script>
+</body>
+</html>
