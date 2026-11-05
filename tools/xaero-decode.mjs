@@ -58,7 +58,7 @@ if (!target || !OUT) {
 
 /* --------------------------- zip 读取（单条目） --------------------------- */
 
-function readZipEntry(buf) {
+export function readZipEntry(buf) {
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 66000); i -= 1) {
     if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
@@ -221,7 +221,7 @@ function fallbackColor(blockId) {
   return [r, g, b];
 }
 
-function colorOf(blockId) {
+export function colorOf(blockId) {
   if (!blockId) return null;
   const short = blockId.replace('minecraft:', '');
   // 防挖矿：所有矿石统一按石头色渲染，避免地图暴露矿点
@@ -245,7 +245,7 @@ function colorOf(blockId) {
  * 解码一个 region.xaero 的 payload。
  * 返回 { version, flags, caveStart, caveDepth, width, height, blocks: Uint8Array(512*512*4) }
  */
-function decodeRegionPayload(payload) {
+export function decodeRegionPayload(payload) {
   let p = 0;
   const u8 = () => {
     if (p >= payload.length) throw new RangeError('读越界');
@@ -419,7 +419,7 @@ function pngChunk(type, data) {
   return Buffer.concat([len, typeBuf, data, crcBuf]);
 }
 
-function encodePng(width, height, rgba) {
+export function encodePng(width, height, rgba) {
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
   ihdr.writeUInt32BE(height, 4);
@@ -545,7 +545,9 @@ async function main() {
   console.log(`世界坐标范围：X ${(MAX_SIDE ? 0 : minX) * REGION_BLOCKS}..${((MAX_SIDE ? 0 : maxX) + 1) * REGION_BLOCKS} · Z ${(MAX_SIDE ? 0 : minZ) * REGION_BLOCKS}..${((MAX_SIDE ? 0 : maxZ) + 1) * REGION_BLOCKS}`);
 }
 
-main().catch((err) => {
-  console.error('解码失败：', err && err.stack ? err.stack : err);
-  process.exit(1);
-});
+if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('xaero-decode.mjs')) {
+  main().catch((err) => {
+    console.error('解码失败：', err && err.stack ? err.stack : err);
+    process.exit(1);
+  });
+}

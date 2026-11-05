@@ -226,3 +226,25 @@ node tools/stitch-xaero-export.mjs <导出目录> --out=stitched.png
 已验证：4 张带坐标的测试图能正确拼成 2×2 网格、每个象限颜色对位准确。
 
 > 如果 Xaero 导出的文件名里没有坐标，把文件列表发我，我按实际命名规则调整解析。
+
+## 10. 瓦片生成与预览
+
+```bash
+node tools/make-tiles.mjs "<..>/Multiplayer_frp-web.com/null/mw$default" --out=.data/tiles/frp-web-overworld
+```
+
+实测（frp-web 主世界地表 371 个区域，12.6 秒）：
+
+| 层级 | 1 像素 = | 瓦片数 | 网格 |
+| --- | --- | --- | --- |
+| 0 | 1 方块 | **1125** | 324 × 45 |
+| 1 | 2 方块 | 371 | 162 × 23 |
+| 2 | 4 方块 | 153 | 81 × 12 |
+| 3 | 8 方块 | 70 | 41 × 7 |
+| … | … | … | … |
+| 9 | 512 方块 | 4 | 2 × 2 |
+
+- 瓦片总 **1,792 张 / 21.5 MB**（level 0 平均 8.7 KB/张），全透明瓦片不写盘
+- 产物：`manifest.json`（层级/原点/世界范围）、`tiles/<level>/<x>_<y>.png`、`viewer.html`
+- 预览：`cd .data/tiles/frp-web-overworld && python -m http.server 8899` → 打开 `http://127.0.0.1:8899/viewer.html`
+- 预览页支持：滚轮缩放（自动切层级）、拖动平移、左下角显示当前层级/缩放/世界坐标
