@@ -115,6 +115,23 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 瓦片更新时间徽标（左面板 = 站点瓦片，中面板 = 合并结果） */
+.mg-badge {
+  margin-left: auto;
+  padding: 3px 9px;
+  border: 1px solid rgba(90, 210, 111, 0.45);
+  border-radius: 999px;
+  background: rgba(90, 210, 111, 0.1);
+  color: var(--accent, #5ad26f);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mg-badge[hidden] {
+  display: none !important;
+}
+
 /* 拖放区 */
 
 .mg-drop {

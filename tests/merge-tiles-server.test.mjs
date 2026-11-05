@@ -248,6 +248,11 @@ test('暂存结果只读端点：manifest / 瓦片 PNG 可读，路径穿越与�
   assert.equal(m.body.source, 'tile-merge');
   assert.deepEqual(m.body.worldBlockRange, { xMin: 0, xMax: 192, zMin: 0, zMax: 192 });
 
+  // analyze 响应里的 stagedGeneratedAt 与暂存 manifest 一致（合并页徽标数据源）
+  assert.ok(typeof res.body.stagedGeneratedAt === 'string' && res.body.stagedGeneratedAt);
+  assert.equal(res.body.stagedGeneratedAt, m.body.generatedAt);
+  assert.ok(Number.isFinite(new Date(res.body.stagedGeneratedAt).getTime()));
+
   // level-0 瓦片可读，内容与合并结果一致（1_1 = 黄）
   const t0 = await fetch(`http://127.0.0.1:${ctx.port}/api/merge-staging/overworld/tiles/0/1_1.png`);
   assert.equal(t0.status, 200);

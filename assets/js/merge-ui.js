@@ -13,6 +13,30 @@ const $ = (id) => document.getElementById(id);
 
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
+/**
+ * 瓦片更新时间文案：本地日期 + 相对天数（今天/昨天/N 天前）。
+ * 与站点 assets/js/tiles.js 的 formatGeneratedAt 同一口径：两个日界都取本地午夜，
+ * Math.round 吸收夏令时造成的 23/25 小时天。iso 无效返回 ''。
+ */
+function formatTileAge(iso, now = Date.now()) {
+  if (typeof iso !== 'string' || !iso) return '';
+  const time = new Date(iso).getTime();
+  if (!Number.isFinite(time)) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  const local = new Date(time);
+  const dateText =
+    `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())} ` +
+    `${pad(local.getHours())}:${pad(local.getMinutes())}`;
+  const dayMs = 24 * 60 * 60 * 1000;
+  const todayStart = new Date(now);
+  todayStart.setHours(0, 0, 0, 0);
+  const thatStart = new Date(time);
+  thatStart.setHours(0, 0, 0, 0);
+  const dayDiff = Math.round((todayStart.getTime() - thatStart.getTime()) / dayMs);
+  const relative = dayDiff <= 0 ? '今天' : dayDiff === 1 ? '昨天' : `${dayDiff} 天前`;
+  return `${dateText}（${relative}）`;
+}
+
 /** 单张图片的缩放/平移视图器 */
 class CanvasView {
   constructor(canvas, { onPick = null, onHover = null, onZoom = null, allowPick = true } = {}) {
@@ -868,6 +892,13 @@ export class MergeUI {
       if (info.generatedAt) lines.push(`生成于 ${esc(new Date(info.generatedAt).toLocaleString('zh-CN'))}`);
     }
     el.innerHTML = lines.join('<br>');
+
+    const badge = $('mg-tiles-base-badge');
+    if (badge) {
+      const age = info.manifest && !info.error ? formatTileAge(info.generatedAt) : '';
+      badge.hidden = !age;
+      badge.textContent = age ? `瓦片更新于 ${age}` : '';
+    }
   }
 
   setTileFiles(files = []) {
@@ -920,6 +951,13 @@ export class MergeUI {
     }
     const hint = $('mg-tiles-hint');
     if (hint) hint.hidden = !!payload;
+
+    const badge = $('mg-tiles-staged-badge');
+    if (badge) {
+      const age = payload ? formatTileAge(payload.stagedGeneratedAt) : '';
+      badge.hidden = !age;
+      badge.textContent = age ? `合并结果生成于 ${age}` : '';
+    }
     this._syncButtons();
   }
 

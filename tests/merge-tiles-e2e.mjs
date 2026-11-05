@@ -184,6 +184,10 @@ async function main() {
       dims: window.__merge.tileDims(),
       tiles: window.__merge.tiles(),
       baseInfo: document.getElementById('mg-tiles-base-info')?.textContent || '',
+      baseBadge: (() => {
+        const el = document.getElementById('mg-tiles-base-badge');
+        return el ? { hidden: el.hidden, text: el.textContent } : null;
+      })(),
       imageCenterHidden: document.getElementById('mg-image-center')?.hidden,
       analyzeDisabled: document.getElementById('mg-analyze')?.disabled,
       saveDisabled: document.getElementById('mg-save')?.disabled,
@@ -199,6 +203,11 @@ async function main() {
       JSON.stringify({ dims: tileBoot.dims, baseInfo: tileBoot.baseInfo }),
     );
     check('§3 未选文件时「分析差异」不可用', tileBoot.analyzeDisabled === true, `analyzeDisabled=${tileBoot.analyzeDisabled}`);
+    check(
+      '§3 瓦片更新日期徽标：显示本地日期与相对天数',
+      tileBoot.baseBadge && tileBoot.baseBadge.hidden === false && /瓦片更新于 .+（今天|昨天）/.test(tileBoot.baseBadge.text),
+      JSON.stringify(tileBoot.baseBadge),
+    );
 
     // 上传两个新图文件
     await setFile('mg-tiles-file', [yellowPath, redPath]);
@@ -227,6 +236,10 @@ async function main() {
       cells: [...document.querySelectorAll('#mg-tiles-stats .mg-stat b')].map((el) => el.textContent),
       canvas: { w: document.getElementById('mg-tiles-canvas')?.width, h: document.getElementById('mg-tiles-canvas')?.height },
       hintHidden: document.getElementById('mg-tiles-hint')?.hidden,
+      stagedBadge: (() => {
+        const el = document.getElementById('mg-tiles-staged-badge');
+        return el ? { hidden: el.hidden, text: el.textContent } : null;
+      })(),
       saveDisabled: document.getElementById('mg-save')?.disabled,
       status: document.getElementById('mg-status')?.textContent,
     }));
@@ -237,6 +250,11 @@ async function main() {
         analysis.cells[3] === '8,192' && analysis.canvas.w === 3 && analysis.canvas.h === 3 &&
         analysis.hintHidden === true && analysis.saveDisabled === false,
       JSON.stringify(analysis),
+    );
+    check(
+      '§4 合并结果徽标：分析后显示生成日期（今天/昨天）',
+      analysis.stagedBadge && analysis.stagedBadge.hidden === false && /合并结果生成于 .+（今天|昨天）/.test(analysis.stagedBadge.text),
+      JSON.stringify(analysis.stagedBadge),
     );
 
     // 对比滑块：旧图 vs 合并结果双画布
@@ -329,9 +347,21 @@ async function main() {
       `backups=${backupDirs.length}`,
     );
 
-    // 发布后分析结果作废，对比滑块跟着隐藏并释放图层
-    const cmpGone = await page.evalFn(() => window.__merge.compare());
-    check('§5 发布后对比滑块已隐藏、图层已释放', cmpGone.visible === false && cmpGone.layers === false, JSON.stringify(cmpGone));
+    // 发布后分析结果作废，对比滑块跟着隐藏并释放图层；合并结果徽标隐藏，基底徽标随新 manifest 刷新
+    const cmpGone = await page.evalFn(() => ({
+      compare: window.__merge.compare(),
+      stagedBadgeHidden: document.getElementById('mg-tiles-staged-badge')?.hidden,
+      baseBadge: (() => {
+        const el = document.getElementById('mg-tiles-base-badge');
+        return el ? { hidden: el.hidden, text: el.textContent } : null;
+      })(),
+    }));
+    check(
+      '§5 发布后对比滑块已隐藏、图层已释放；合并结果徽标隐藏、基底徽标仍显示',
+      cmpGone.compare.visible === false && cmpGone.compare.layers === false &&
+        cmpGone.stagedBadgeHidden === true && cmpGone.baseBadge?.hidden === false,
+      JSON.stringify(cmpGone),
+    );
 
     // 单图模式未受影响
     await page.evalFn(() => document.getElementById('mg-mode-image').click());

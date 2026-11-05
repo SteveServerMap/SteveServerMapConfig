@@ -669,7 +669,12 @@ async function runAnalyzeTiles() {
     state.tiles.analysis = res;
     state.tiles.staged = true;
     state.tiles.stale = false;
-    state.ui.setTileAnalysis({ counts: res.counts, blocksArea: res.blocksArea, grid: res.grid });
+    state.ui.setTileAnalysis({
+      counts: res.counts,
+      blocksArea: res.blocksArea,
+      grid: res.grid,
+      stagedGeneratedAt: res.stagedGeneratedAt,
+    });
     state.ui.setTileState({ staged: true, stale: false });
     state.ui.setStatus(
       `分析完成：新增 ${res.counts.onlyIncoming} 瓦片 · 变更 ${res.counts.changed} 瓦片 · 仅目标图 ${res.counts.onlyBase} 瓦片（耗时 ${(res.durationMs / 1000).toFixed(1)}s）`,

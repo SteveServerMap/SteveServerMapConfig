@@ -922,6 +922,7 @@ async function handleApi(req, res, url) {
         levels: result.manifest.levels.length,
         baseTiles: result.manifest.stats.baseTiles,
       },
+      stagedGeneratedAt: result.manifest.generatedAt,
       durationMs: result.durationMs,
     };
     log(`瓦片差分分析完成：${dim} 新增 ${result.counts.onlyIncoming} · 变更 ${result.counts.changed} · 仅目标图 ${result.counts.onlyBase}（${summary.durationMs}ms）`);
