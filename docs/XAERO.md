@@ -74,3 +74,42 @@ Xaero 导出的是 1 px/方块、可能几十张的大图，站点现在的「�
 - Xaero 区域大小：`MapRegion` 128×128 方块（8×8 `MapTileChunk`，每个 chunk 16×16 方块），导出像素 1 px/方块；
 - 存储版本常量：`currentSaveMajorVersion=6`、`currentSaveMinorVersion=8`；缓存 `1.25`；
 - 数据里带方块状态调色板与生物群系调色板，**颜色由 Xaero 自己按方块渲染**，所以逆向出来也只能得到方块 ID，需要自备配色表 —— 而「导出 PNG」直接拿到渲染好的像素，省掉这一步。
+
+## 6. 二进制格式（已确认部分，来自 8.8 版 jar 字节码）
+
+> 你这份数据是 **save 8.8**（头部 `ff 00 08 00 08`），本机 `xaeroworldmap-fabric-26.3-1.47.0.jar` 正好是这个版本，
+> 格式是从它的 `MapSaveLoad.saveRegion/loadRegion/savePixel` 字节码里读出来的。
+
+`region.xaero`（zip 内唯一文件）按 `DataOutputStream` 顺序写：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| 魔数 | 1 字节 | 固定 `0xFF` |
+| 版本 | int | `(major << 16) | minor`，8.8 → `0x00080008` |
+| flags | 1 字节 | 观察值 `0x07` |
+| worldInterpretationVersion | 1 字节 | 仅当 flags 含 `0x02`；观察值 `0xFF` |
+| caveStart | int | 仅当 flags 含 `0x04`；`-1` 表示非洞穴图 |
+| caveDepth | 1 字节 | 仅当 flags 含 `0x04`；观察值 `0xFF` |
+| 区块存在表 | 待定（8~64 字节） | 8×8=64 个 MapTileChunk 的 loadState |
+| 每个存在区块 | int + 4×4 个 tile | tile 头 4 字节（0 = 空 tile），然后 16×16 个方块 |
+| 每方块 | `savePixel` | 见下面的 `parametres` 位域 |
+
+`parametres`（每方块先写一个 int，位域）：
+
+| 位 | 掩码 | 含义 |
+| --- | --- | --- |
+| 0 | `0x1` | 有方块状态（否则是草地贴图格） |
+| 1 | `0x2` | 有 overlay 层 |
+| 8–15 | `0xFF00` | light |
+| 12–19 / 25–28 | — | height（12 位：低 8 位在 12..19，高 4 位在 25..28） |
+| 20 | `0x100000` | 有 biome |
+| 21 | `0x200000` | 方块状态是**内联 NBT**（否则写 int 调色板索引） |
+| 22 | `0x400000` | biome 是**内联 UTF 字符串**（否则写 int 索引） |
+| 24 | `0x1000000` | 高度与 topHeight 不同 → 多写 1 字节 topHeight |
+
+内联方块状态 NBT 长这样（实测）：`0a 00 00 08 00 02 "id" <len> "minecraft:gravel" 00`；带属性时还有 `properties` 子 compound。
+调色板按写入顺序累积：索引 = 写入时 `HashMap.size()`。
+
+**当前进度**：`tools/xaero-decode.mjs` 已实现 zip 解包、NBT 读取、`parametres` 位域、逐方块解出方块 ID 并渲染 PNG；
+卡在**区块存在表/区块头的确切字节数**上（头部之后到第一段内联 NBT 之间还有 10 字节没对上），
+下一步用"自适应布局探测"（尝试 8 字节位图 / 64 字节数组 / 各 int 组合，取能连续解出合法 `minecraft:*` ID 的那种）来定死。
