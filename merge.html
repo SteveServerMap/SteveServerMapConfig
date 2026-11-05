@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>地图合并 · Steve Server 地图配置工具</title>
+<meta name="description" content="把别人给的地图 PNG 与当前站点地图对齐，自动算出新增/变更区域并按策略合并。">
+<link rel="stylesheet" href="assets/css/tool.css">
+<link rel="stylesheet" href="assets/css/merge.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f1210'/%3E%3Cpath d='M8 16h7V9h2v7h7v2h-7v7h-2v-7H8z' fill='%235ad26f'/%3E%3C/svg%3E">
+</head>
+<body class="mg-page">
+
+<div id="merge-app" class="mg-app">
+
+  <!-- ============================ 顶栏 ============================ -->
+  <header class="mg-topbar">
+    <div class="mg-brand">
+      <button id="mg-back" class="btn ghost small" type="button" title="返回配置工具">
+        <svg class="icon"><use href="#i-chevron-left"></use></svg><span>返回配置工具</span>
+      </button>
+      <div class="mg-brand-text">
+        <h1 id="mg-title" class="mg-title">地图合并</h1>
+        <p id="mg-subtitle" class="mg-subtitle">把别人给的地图与你站点的地图对齐 → 找出新增/变更 → 合并</p>
+      </div>
+    </div>
+    <div class="mg-actions">
+      <span id="mg-status" class="status-chip" data-tone="info">等待载入</span>
+      <button id="mg-analyze" class="btn ghost" type="button" title="按当前校准计算两张图的差异">
+        <svg class="icon"><use href="#i-search"></use></svg><span>分析差异</span>
+      </button>
+      <button id="mg-apply" class="btn ghost" type="button" disabled title="按策略合成一张新的地图">
+        <svg class="icon"><use href="#i-layers"></use></svg><span>按策略合并</span>
+      </button>
+      <button id="mg-download" class="btn ghost" type="button" disabled title="下载合并后的 PNG">
+        <svg class="icon"><use href="#i-download"></use></svg><span>下载 PNG</span>
+      </button>
+      <button id="mg-save" class="btn primary" type="button" disabled title="写回站点目录（写前自动备份）">
+        <svg class="icon"><use href="#i-save"></use></svg><span>保存到站点</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ============================ 主体：三栏 ============================ -->
+  <main class="mg-body">
+
+    <!-- 左：目标图 -->
+    <section class="mg-panel mg-left" aria-label="目标图（当前站点地图）">
+      <div class="mg-panel-head">
+        <h2 class="mg-panel-title">目标图 · 当前站点地图</h2>
+        <span id="mg-base-meta" class="mg-meta">未载入</span>
+      </div>
+
+      <div id="mg-base-drop" class="mg-drop" role="button" tabindex="0" title="点击选择文件，或把 PNG 拖到这里">
+        <svg class="icon"><use href="#i-image"></use></svg>
+        <span>点击选择 / 拖入 PNG（留空则用站点里该维度的地图）</span>
+      </div>
+      <input id="mg-base-file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+
+      <div class="mg-canvas-wrap">
+        <canvas id="mg-base-canvas" class="mg-canvas" width="512" height="512"></canvas>
+        <div id="mg-base-hint" class="mg-canvas-hint">载入后在此点一下世界原点 (0,0)</div>
+      </div>
+
+      <div class="mg-controls">
+        <button id="mg-base-pick" class="btn ghost small" type="button">
+          <svg class="icon"><use href="#i-target"></use></svg><span>拾取 (0,0)</span>
+        </button>
+        <label class="mg-field">
+          <span>每方块像素</span>
+          <input id="mg-base-ppb" type="number" step="any" min="0.001" value="1">
+        </label>
+        <span id="mg-base-cal" class="mg-cal">—</span>
+      </div>
+    </section>
+
+    <!-- 中：结果预览 -->
+    <section class="mg-center" aria-label="合并结果预览">
+      <div class="mg-panel-head">
+        <h2 class="mg-panel-title">合并预览</h2>
+        <div id="mg-legend" class="mg-legend">
+          <span class="mg-legend-item"><i class="mg-dot mg-dot-new"></i>新增</span>
+          <span class="mg-legend-item"><i class="mg-dot mg-dot-changed"></i>变更</span>
+          <span class="mg-legend-item"><i class="mg-dot mg-dot-onlybase"></i>仅目标图</span>
+        </div>
+      </div>
+
+      <div class="mg-canvas-wrap mg-center-wrap">
+        <canvas id="mg-result-canvas" class="mg-canvas" width="512" height="512"></canvas>
+        <div id="mg-result-hint" class="mg-canvas-hint">分析差异后这里显示合并结果</div>
+      </div>
+
+      <div id="mg-stats" class="mg-stats">
+        <div class="mg-stat"><b>—</b><span>新增</span></div>
+        <div class="mg-stat"><b>—</b><span>变更</span></div>
+        <div class="mg-stat"><b>—</b><span>仅目标图</span></div>
+        <div class="mg-stat"><b>—</b><span>新增面积</span></div>
+      </div>
+    </section>
+
+    <!-- 右：新图 -->
+    <section class="mg-panel mg-right" aria-label="新图（别人给的地图）">
+      <div class="mg-panel-head">
+        <h2 class="mg-panel-title">新图 · 从别人那里下载的</h2>
+        <span id="mg-inc-meta" class="mg-meta">未载入</span>
+      </div>
+
+      <div id="mg-inc-drop" class="mg-drop" role="button" tabindex="0" title="点击选择文件，或把 PNG 拖到这里">
+        <svg class="icon"><use href="#i-image"></use></svg>
+        <span>点击选择 / 拖入 PNG</span>
+      </div>
+      <input id="mg-inc-file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+
+      <div class="mg-canvas-wrap">
+        <canvas id="mg-inc-canvas" class="mg-canvas" width="512" height="512"></canvas>
+        <div id="mg-inc-hint" class="mg-canvas-hint">在新图上点一下世界原点 (0,0)</div>
+      </div>
+
+      <div class="mg-controls">
+        <button id="mg-inc-pick" class="btn ghost small" type="button">
+          <svg class="icon"><use href="#i-target"></use></svg><span>拾取 (0,0)</span>
+        </button>
+        <label class="mg-field">
+          <span>每方块像素</span>
+          <input id="mg-inc-ppb" type="number" step="any" min="0.001" value="1">
+        </label>
+        <span id="mg-inc-cal" class="mg-cal">—</span>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============================ 页脚：阈值与策略 ============================ -->
+  <footer class="mg-footer">
+    <div class="mg-footer-group">
+      <label class="mg-field"><span>tile 像素</span><input id="mg-tile-size" type="number" min="4" step="4" value="16"></label>
+      <label class="mg-field"><span>空白亮度阈值</span><input id="mg-void-lum" type="number" min="0" max="64" step="1" value="8"></label>
+      <label class="mg-field"><span>变更色差阈值</span><input id="mg-diff-thr" type="number" min="1" max="128" step="1" value="24"></label>
+    </div>
+    <div class="mg-footer-group">
+      <label class="mg-check"><input id="mg-opt-fill" type="checkbox" checked> 用新图补齐空白</label>
+      <label class="mg-check"><input id="mg-opt-update" type="checkbox" checked> 用新图覆盖变更区域</label>
+      <label class="mg-field"><span>保存为</span><input id="mg-save-name" type="text" placeholder="主世界.png"></label>
+    </div>
+    <p class="mg-note">
+      提示：「变更」是按像素色差判断的启发式结果。若两张图的渲染调色板/光照不同，会大面积判为变更 ——
+      请先看中间预览的色块，再决定是否覆盖。保存前会自动备份到站点仓库的 <code>.backups/</code>。
+    </p>
+  </footer>
+</div>
+
+<div id="mg-toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<!-- ============================ 图标精灵（复用工具页面的那套） ============================ -->
+<svg class="icon-sprite" aria-hidden="true" focusable="false" width="0" height="0">
+  <defs>
+    <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="M14.5 5l-7 7 7 7"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 12l5 5 5-5"/><path d="M5 20h14"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4"/><path d="M8 15h8"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6"/><path d="M21 16l-5-5-6 6"/></symbol>
+  </defs>
+</svg>
+
+<script type="module" src="assets/js/merge.js"></script>
+</body>
+</html>
