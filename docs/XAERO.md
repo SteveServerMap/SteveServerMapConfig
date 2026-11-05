@@ -248,3 +248,39 @@ node tools/make-tiles.mjs "<..>/Multiplayer_frp-web.com/null/mw$default" --out=.
 - 产物：`manifest.json`（层级/原点/世界范围）、`tiles/<level>/<x>_<y>.png`、`viewer.html`
 - 预览：`cd .data/tiles/frp-web-overworld && python -m http.server 8899` → 打开 `http://127.0.0.1:8899/viewer.html`
 - 预览页支持：滚轮缩放（自动切层级）、拖动平移、左下角显示当前层级/缩放/世界坐标
+
+## 11. 最终采用路线（结论）
+
+经过对比，**采用 Xaero 自带导出的 PNG**，不再使用缓存二进制解码的结果：
+
+| 路线 | 状态 | 原因 |
+| --- | --- | --- |
+| `region.xaero` 缓存解码（本仓库 tools/xaero-decode.mjs） | 工具保留，数据已删 | 自研配色与游戏内观感差异大；但格式已完全还原，留作参考 |
+| **Xaero「Export Map as PNG」导出图** | ✅ **当前采用** | 颜色 100% 与游戏内一致，1 px = 1 方块，清晰度等同游戏内 |
+
+### 现在的完整流程
+
+```bash
+# 1) 游戏内：世界地图 → 右键拖框/Force Full Map → Export Map as PNG
+#    勾 Multiple Unscaled Images（大范围必备），Max Single Image Size 无关紧要
+#    导出到 .minecraft/XaeroWorldMap/exports/
+
+# 2) 导出图 → 瓦片（1 px = 1 方块 + 金字塔 + 预览页）
+node tools/xaero-export-to-tiles.mjs <导出目录> --out=.data/tiles/export
+
+# 3) 本地预览
+cd .data/tiles/export && python -m http.server 8898
+#    → http://127.0.0.1:8898/viewer.html
+```
+
+导出图命名规则（实测）：`<行>_<列>_x<世界X>_z<世界Z>.png`，每张 1024×1024 px = 1024×1024 方块。
+
+### 已知限制
+
+- Xaero 导出的原生分辨率就是 **1 px = 1 方块**，再放大只是像素变大（预览页已关掉插值，放大保持锐利）
+- 若需要更高分辨率：服务器装 **BlueMap / Dynmap / squaremap**（实时、可分更高倍率），或用世界存档跑 Unmined / Chunky
+- Xaero 是**客户端缓存**：服务器插件改过的地形，只有在制图者再次经过该区域时才会更新
+
+### 数据清理
+
+`.data/world-map.rar`（253.6 MB 的 Xaero 缓存）已删除，`.data` 只保留导出图与瓦片（约 9 MB）。
