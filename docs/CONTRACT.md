@@ -1,6 +1,6 @@
 # SteveServerMapConfig —— 内部接口契约
 
-本仓库是 **SteveServerMap.github.io 的本地配置与预览工具**：在浏览器里编辑维度/路径点/分组/画幅校准，
+本仓库是 **SteveServerMap.github.io 的本地配置与预览工具**：在浏览器里编辑维度/路径点/分组，
 实时用**真实站点**预览效果，最后把 `config.json` 写回站点仓库。
 
 - **零依赖、零构建**：只用 Node 内置模块（`node:http`/`node:fs`）+ 原生 ES Module，不 `npm install`。
@@ -59,7 +59,7 @@ node server.mjs --port=5300 --site="D:/Project/Github/SteveServerMap.github.io"
         "calibrated": true,
         "xMin": -1792, "xMax": 1792, "zMin": -2560, "zMax": 2560,
         "flipZ": false,
-        "note": "两点校准 · …"
+        "note": "画幅 · …"
       },
       "groups": [{ "id": "base", "name": "据点", "color": "#5ad26f", "visible": true }],
       "waypoints": [
@@ -111,9 +111,9 @@ export function waypointById(dimension, id)
 校验规则（严重度）：
 - `dimensions` 至少 1 个、`id/name/image` 非空、维度 `id` 唯一 → error
 - `tiles`（可选）：`manifest` 非空字符串 → 否则 error；不以 `.json` 结尾 → warning
-- `calibration` 四边界有限且 `xMax>xMin`、`zMax>zMin`；`calibrated !== true` → warning（提示去校准）
-  - **瓦片维度例外**：世界范围来自 manifest，`calibration` 只作单图兜底，因此「缺校准 / 画幅不合法 /
-    未标记已校准」全部降级为 warning（瓦片维度无需手动画幅校准即可保存）
+- `calibration` 四边界有限且 `xMax>xMin`、`zMax>zMin`；`calibrated !== true` → warning（提示补画幅）
+  - **瓦片维度例外**：世界范围来自 manifest，`calibration` 只作单图兜底，因此「缺画幅 / 画幅不合法 /
+    未标记已确认」全部降级为 warning（瓦片维度无需画幅即可保存）
 - 路径点：`id` 在维度内唯一、`name` 非空、`x`/`z` 有限 → error；`group` 不存在 → warning 并回落到 `default` 分组
 - 分组：`id` 唯一、`color` 形如 `#rrggbb` → error；空分组 → warning
 - `image` 不在 `ctx.imageNames` → warning（缺图，站点会显示「地图还没上传」）
@@ -133,7 +133,6 @@ export function waypointById(dimension, id)
 export class EditorCanvas {
   constructor(container, {
     onViewChange(viewState),        // { scale, tx, ty, viewWidth, viewHeight, imageWidth, imageHeight }
-    onPickPoint({ px, py, world }), // 「拾取」模式下在地图点击
     onMarkerClick(waypointId, { clientX, clientY }),
     onMarkerDragStart(id), onMarkerDrag(id), onMarkerDragEnd({ id, world }), // 拖拽改坐标
     onEmptyClick({ px, py, world }),// 普通模式下点击空白（用于取消选中）
@@ -147,8 +146,7 @@ export class EditorCanvas {
   setProjection(projection)              // 站点 coords.js createProjection 的返回对象
   setData({ waypoints, groups, projection })
   setSelection(waypointId | null)
-  setMode('select' | 'place' | 'pick')   // pick = 校准拾取（光标十字、点击不拖拽）
-  setPickPoints([{ px, py }] )           // 校准拾取到的点位（画十字/连线）
+  setMode('select' | 'place')            // place = 放置模式（光标变化、点击落位）
   setGrid(visible)
   setLabelMode('always' | 'hover' | 'never')
   setGroupVisible(groupId, visible)
@@ -163,7 +161,7 @@ export class EditorCanvas {
 
 交互要求：滚轮以光标为锚点缩放、拖拽平移、双击放大、`+`/`-`/方向键、触摸捏合；
 标记拖拽（无 lib，Pointer Events，移动超过 3px 才算拖拽，松手回调世界坐标）；
-`pick` 模式下点击不触发拖拽、不选中标记；空数据/无图片时安全不抛错。
+空数据/无图片时安全不抛错。
 
 **底图二选一（2026-11-06 新增瓦片）**
 - 单图：`<img id="canvas-image">`（`.canvas-image` 靠 `is-loaded` 淡入）；
@@ -196,7 +194,7 @@ export class EditorPanel {
 
 `onAction` 取值：`save` `reload-site` `import-config` `export-json` `preview` `undo` `redo`
 `new-dimension` `delete-dimension` `new-group` `delete-group` `new-waypoint` `delete-waypoint`
-`duplicate-waypoint` `import-image` `fit` `grid` `toggle-labels` `goto-calibrate` `copy-command`
+`duplicate-waypoint` `import-image` `fit` `grid` `toggle-labels` `copy-command`
 `open-site-folder`。
 
 `index.html` 中已存在的节点（编辑器填充这些）：
@@ -254,11 +252,10 @@ export class EditorPanel {
 1. `node server.mjs --port=<空闲端口>` 能启动，`GET /api/health` 200。
 2. 打开页面 3 秒内渲染出维度/分组/路径点树，无 console error。
 3. 载入站点现有 `config.json` 后，树里的路径点数量与站点一致（主世界 10 个）。
-4. 「拾取」两点后画幅解算正确（对站点现有画幅误差 < 2 方块）。
-5. 新增路径点 → 画布点一下 → 坐标出现在表单里 → 保存 → 读回站点 `config.json` 校验：新点存在、字段合法、`JSON.parse` 通过、`config.schema.json` 校验通过。
-6. 保存前存在 error（例如删掉维度 id）时保存被阻止并提示。
-7. 预览 iframe 能加载真实站点并渲染出当前草稿的路径点数量。
-8. 服务器对越界路径写入返回 4xx（例如 `fileName: "../evil.png"`）。
+4. 新增路径点 → 画布点一下 → 坐标出现在表单里 → 保存 → 读回站点 `config.json` 校验：新点存在、字段合法、`JSON.parse` 通过、`config.schema.json` 校验通过。
+5. 保存前存在 error（例如删掉维度 id）时保存被阻止并提示。
+6. 预览 iframe 能加载真实站点并渲染出当前草稿的路径点数量。
+7. 服务器对越界路径写入返回 4xx（例如 `fileName: "../evil.png"`）。
 
 ---
 
@@ -306,30 +303,17 @@ window.__tool = {
   draft(), state(), canvas,            // 读状态
   save(), preview(),                    // 与 UI 同一代码路径；save 失败不抛异常，返回 {ok:false,error}
   action(name),                         // 复用 onAction
-  calibrate(a, b),                      // {px,py,x,z} 两点反解并应用
   json(), validate(), select(), patch(),
-  activateDimension(), undo(), redo(), setCalibration(), toast(),
+  activateDimension(), undo(), redo(), toast(),
   tiles(), tileMeta(),                  // 瓦片渲染状态 / 当前维度 manifest 元信息（单图模式为 null）
 }
 ```
 
 ### 8.6 已修复的实现缺陷（回归用例见 docs/QA.md）
-1. 校准对话框忘了把面板 append 到遮罩上（对话框是空的）；
-2. 校准对话框全屏遮罩挡住画布，导致两点拾取无法点图（拾取时遮罩 `pointer-events:none` + 提示条）；
-3. 手填 X/Z 没有 `input` 监听，解算不触发、「应用」永远禁用；
-4. 撤销按字符记录（已合并）；
-5. 维度 id 清空/改名后编辑器找不到当前维度（已按索引兜底）。
+1. 撤销按字符记录（已合并）；
+2. 维度 id 清空/改名后编辑器找不到当前维度（已按索引兜底）。
 
-### 8.7 原点校准（世界 (0,0) 模式）
-校准对话框除「两点校准」「直接输入画幅」外，还有第三种：只指定世界 (0,0) 所在图片像素 + 每方块像素数。
-- 公式：`blocksPerPixel = 1 / pxPerBlock`；`xMin = -px0 * blocksPerPixel`；`xMax = xMin + W * blocksPerPixel`；
-  `flipZ=false` 时 `zMin = -py0 * blocksPerPixel`、`zMax = zMin + H * blocksPerPixel`；
-  `flipZ=true` 时 `zMax = py0 * blocksPerPixel`、`zMin = zMax - H * blocksPerPixel`。
-- 调试接口：`window.__tool.setOrigin({ px, py, pxPerBlock, flipZ })` 走同一套数学。
-- 注意：`canvas.imageToScreen()` / `worldToScreen()` 返回的是**画布容器内坐标**（不是页面 client 坐标），
-  CDP/自动化里要自己加上 `#canvas-root` 的 `getBoundingClientRect()` 偏移。
-
-### 8.8 瓦片底图（2026-11-06）
+### 8.7 瓦片底图（2026-11-06）
 站点侧已有瓦片渲染（站点 `assets/js/tiles.js` + `tiles/manifest.json`），工具复用同一套模块，
 **不复制任何瓦片数学**：
 - manifest 路径：站点相对路径（如 `tiles/manifest.json`），工具通过 `/preview/<path>` 读取；

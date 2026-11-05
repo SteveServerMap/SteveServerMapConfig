@@ -18,7 +18,7 @@
  *   - 世界坐标 ↔ 图片像素的**唯一**实现来自站点的 /preview/assets/js/coords.js
  *     （createProjection），本文件绝不自己写一份投影数学。
  *   - 父模块（app.js）通过 setData / setProjection 把数据推进来；本模块只负责渲染与交互，
- *     所有用户动作用回调上报（onMarkerClick / onMarkerDrag* / onPickPoint / onEmptyClick / onHover）。
+ *     所有用户动作用回调上报（onMarkerClick / onMarkerDrag* / onEmptyClick / onHover）。
  *   - 样式由 assets/css/tool.css 负责；本模块只在 JS 里写「语义必需」的兜底内联样式
  *     （transform-origin / position / width-height / touch-action / pointer-events），
  *     保证 CSS 还没就位时也不会错位。
@@ -51,7 +51,7 @@ const FIT_PADDING = 24;           // 整图适配留白（px）
 const POS_EPS = 0.25;             // 标记位置写 DOM 的最小变化量（px）
 const DEFAULT_COLOR = '#5ad26f';
 const LABEL_MODES = ['always', 'hover', 'never'];
-const MODES = ['select', 'place', 'pick'];
+const MODES = ['select', 'place'];
 const OFFSCREEN = '-9999px';
 
 /** 这些 UI 子元素上的滚轮 / 指针事件不参与地图拖拽与地图点击（标记由本文件单独处理） */
@@ -112,7 +112,6 @@ export class EditorCanvas {
    * @param {HTMLElement} container #canvas-root
    * @param {object} [callbacks]
    * @param {(state: object) => void} [callbacks.onViewChange]       每帧视图变化
-   * @param {(point: {px:number, py:number, world: {x:number,z:number}|null}) => void} [callbacks.onPickPoint] pick 模式点击地图
    * @param {(id: string, info: {clientX:number, clientY:number}) => void} [callbacks.onMarkerClick] 点击标记（未拖动）
    * @param {(id: string, info: object) => void} [callbacks.onMarkerDragStart] 标记开始拖拽
    * @param {(id: string, info: object) => void} [callbacks.onMarkerDrag] 标记拖拽中
@@ -122,7 +121,6 @@ export class EditorCanvas {
    */
   constructor(container, {
     onViewChange,
-    onPickPoint,
     onMarkerClick,
     onMarkerDragStart,
     onMarkerDrag,
@@ -149,7 +147,6 @@ export class EditorCanvas {
 
     this._callbacks = {
       onViewChange: typeof onViewChange === 'function' ? onViewChange : null,
-      onPickPoint: typeof onPickPoint === 'function' ? onPickPoint : null,
       onMarkerClick: typeof onMarkerClick === 'function' ? onMarkerClick : null,
       onMarkerDragStart: typeof onMarkerDragStart === 'function' ? onMarkerDragStart : null,
       onMarkerDrag: typeof onMarkerDrag === 'function' ? onMarkerDrag : null,
@@ -187,7 +184,6 @@ export class EditorCanvas {
     this._hoverId = null;
     this._labelMode = 'hover';
     this._mode = 'select';
-    this._pickPoints = [];
     this._gridVisible = false;
 
     // ---- 交互状态 ----
@@ -206,7 +202,6 @@ export class EditorCanvas {
 
     // ---- 子图层（本文件创建，destroy 时清掉） ----
     this._gridEl = null;
-    this._pickLayer = null;
 
     // ---- 瓦片底图（可选；用 <canvas id="canvas-tiles"> 替代 <img> 作为底图） ----
     /** @type {HTMLCanvasElement|null} */
@@ -240,7 +235,7 @@ export class EditorCanvas {
   /* ====================================================================== */
 
   /**
-   * 创建 / 复用瓦片底图 canvas（子图层，和 _gridEl / _pickLayer 同类，不算顶层 DOM）。
+   * 创建 / 复用瓦片底图 canvas（子图层，和 _gridEl 同类，不算顶层 DOM）。
    * 初始隐藏：单图模式只显示 #canvas-image；切到瓦片模式时再显示。
    * @returns {HTMLCanvasElement|null}
    */
@@ -407,10 +402,6 @@ export class EditorCanvas {
       this._gridEl.remove();
       this._gridEl = null;
     }
-    if (this._pickLayer) {
-      this._pickLayer.remove();
-      this._pickLayer = null;
-    }
     // 瓦片层：取消排队中的 rAF + 销毁 TileLayer（会清缓存/取消瓦片请求）+ 移除 canvas
     this._cancelTileDraw();
     if (this._tileLayer) {
@@ -483,12 +474,11 @@ export class EditorCanvas {
     safeCall(this._callbacks.onViewChange, this.getViewState());
   }
 
-  /** 重排覆盖层：标记 + 网格 + 拾取点（只写 transform / classList，不读布局、不重建 DOM） */
+  /** 重排覆盖层：标记 + 网格（只写 transform / classList，不读布局、不重建 DOM） */
   _layoutOverlay() {
     if (this._destroyed) return;
     this._layoutMarkers();
     this._layoutGrid();
-    this._layoutPickLayer();
   }
 
   _layoutMarkers() {
@@ -1121,10 +1111,6 @@ export class EditorCanvas {
       fragment.appendChild(el);
     }
     this.overlay.appendChild(fragment);
-    // 拾取图层永远盖在标记之上（但 pointer-events 全关，不影响交互）
-    if (this._pickLayer && this._pickLayer.parentNode === this.overlay) {
-      this.overlay.appendChild(this._pickLayer);
-    }
   }
 
   _createMarker(waypoint) {
@@ -1140,7 +1126,7 @@ export class EditorCanvas {
     marker.style.left = '0px';
     marker.style.top = '0px';
     marker.style.touchAction = 'none';
-    marker.style.pointerEvents = this._mode === 'pick' ? 'none' : 'auto';
+    marker.style.pointerEvents = 'auto';
     marker.style.transform = `translate3d(${OFFSCREEN}, ${OFFSCREEN}, 0)`;
     marker.setAttribute('aria-label', `${waypoint.name || id}（路径点）`);
 
@@ -1219,7 +1205,7 @@ export class EditorCanvas {
   }
 
   /* ====================================================================== */
-  /* 公开设置：选中 / 模式 / 拾取点 / 网格 / 标签 / 显隐 / 过滤               */
+  /* 公开设置：选中 / 模式 / 网格 / 标签 / 显隐 / 过滤                        */
   /* ====================================================================== */
 
   /** 选中态（传 null 取消选中） */
@@ -1236,10 +1222,9 @@ export class EditorCanvas {
   }
 
   /**
-   * 'select' | 'place' | 'pick'
+   * 'select' | 'place'
    *   select：常规编辑（拖拽平移 / 拖拽标记 / 点击选中）
    *   place ：点击空白处放置新路径点（回调 onEmptyClick，光标十字）
-   *   pick  ：校准拾取（点击地图回调 onPickPoint，不选中也不拖拽标记）
    */
   /** 开启/关闭「拖动标记移动」；关闭时按住标记拖动不会改变坐标（Alt 键可临时启用） */
   setDragMoveEnabled(enabled) {
@@ -1257,16 +1242,10 @@ export class EditorCanvas {
     this.container.dataset.canvasMode = next;
     this.container.style.cursor = this._baseCursor();
 
-    // pick 模式下标记完全不接事件，保证「点到路径点也算拾取」
-    const markerEvents = next === 'pick' ? 'none' : 'auto';
-    for (const el of this._els.values()) el.style.pointerEvents = markerEvents;
-
     if (this.modeBadge) {
-      // #mode-badge 的文案由 app.js 决定（它会写「拾取地标 A…」这类上下文）；
+      // #mode-badge 的文案由 app.js 决定（它会写「在图上新建…」这类上下文）；
       // 这里只在它还没写文案时给一个兜底，避免两边互相覆盖。
-      const text = next === 'pick'
-        ? '拾取模式：点击地图上的地标'
-        : (next === 'place' ? '放置模式：点击地图放置路径点' : '');
+      const text = next === 'place' ? '放置模式：点击地图放置路径点' : '';
       if (text) {
         if ((this.modeBadge.textContent || '').trim() === '') this.modeBadge.textContent = text;
         this.modeBadge.hidden = false;
@@ -1277,24 +1256,13 @@ export class EditorCanvas {
     return this._mode;
   }
 
-  /** @returns {'select'|'place'|'pick'} */
+  /** @returns {'select'|'place'} */
   getMode() {
     return this._mode;
   }
 
   _baseCursor() {
-    return this._mode === 'pick' || this._mode === 'place' ? 'crosshair' : 'grab';
-  }
-
-  /** 校准拾取到的点位（图片像素坐标）：画十字与连线 */
-  setPickPoints(points) {
-    this._pickPoints = Array.isArray(points)
-      ? points
-        .filter((p) => p && isNum(Number(p.px)) && isNum(Number(p.py)))
-        .map((p) => ({ px: Number(p.px), py: Number(p.py) }))
-      : [];
-    this._renderPickLayer();
-    this._layoutPickLayer();
+    return this._mode === 'place' ? 'crosshair' : 'grab';
   }
 
   /** 坐标网格（世界方块对齐）显隐 */
@@ -1568,113 +1536,6 @@ export class EditorCanvas {
   }
 
   /* ====================================================================== */
-  /* 拾取图层（内联 SVG：不依赖 CSS 也画得对）                                */
-  /* ====================================================================== */
-
-  _ensurePickLayer() {
-    if (this._pickLayer) return this._pickLayer;
-    if (!this.overlay) return null;
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('class', 'canvas-pick-layer');
-    svg.setAttribute('aria-hidden', 'true');
-    const st = svg.style;
-    st.position = 'absolute';
-    st.left = '0px';
-    st.top = '0px';
-    st.width = '100%';
-    st.height = '100%';
-    st.overflow = 'visible';
-    st.pointerEvents = 'none';
-    st.zIndex = '4';
-    this.overlay.appendChild(svg);
-    this._pickLayer = svg;
-    return svg;
-  }
-
-  /** 按当前 pickPoints 重建 SVG 子节点（只在 setPickPoints 时调用） */
-  _renderPickLayer() {
-    const svg = this._ensurePickLayer();
-    if (!svg) return;
-    while (svg.firstChild) svg.removeChild(svg.firstChild);
-
-    const NS = 'http://www.w3.org/2000/svg';
-    const make = (name, attrs) => {
-      const node = document.createElementNS(NS, name);
-      for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
-      return node;
-    };
-
-    // 先画连线（在下），再画十字（在上）
-    for (let i = 1; i < this._pickPoints.length; i += 1) {
-      svg.appendChild(make('line', {
-        class: 'pick-line',
-        x1: 0, y1: 0, x2: 0, y2: 0,
-        stroke: 'currentColor',
-        'stroke-width': 1.5,
-        'stroke-dasharray': '5 4',
-        'vector-effect': 'non-scaling-stroke',
-      }));
-    }
-    this._pickPoints.forEach((_, index) => {
-      const g = make('g', { class: 'pick-crosshair', 'data-index': index });
-      const circle = make('circle', {
-        cx: 0, cy: 0, r: 6, fill: 'none', stroke: 'currentColor',
-        'stroke-width': 1.5, 'vector-effect': 'non-scaling-stroke',
-      });
-      const hLine = make('line', {
-        x1: -9, y1: 0, x2: 9, y2: 0, stroke: 'currentColor',
-        'stroke-width': 1.5, 'vector-effect': 'non-scaling-stroke',
-      });
-      const vLine = make('line', {
-        x1: 0, y1: -9, x2: 0, y2: 9, stroke: 'currentColor',
-        'stroke-width': 1.5, 'vector-effect': 'non-scaling-stroke',
-      });
-      g.append(hLine, vLine, circle);
-      svg.appendChild(g);
-    });
-
-    // 保证拾取图层在覆盖层最上（标记是后创建的也没关系）
-    if (this._pickLayer.parentNode === this.overlay) this.overlay.appendChild(this._pickLayer);
-  }
-
-  _layoutPickLayer() {
-    const svg = this._pickLayer;
-    if (!svg) return;
-    const has = this._pickPoints.length > 0;
-    const display = has ? 'block' : 'none';
-    if (svg.style.display !== display) svg.style.display = display;
-    if (!has) return;
-
-    const { width: vw, height: vh } = this._viewSize();
-    const key = `${vw}x${vh}`;
-    if (svg.dataset.size !== key) {
-      svg.setAttribute('viewBox', `0 0 ${vw} ${vh}`);
-      svg.setAttribute('width', String(vw));
-      svg.setAttribute('height', String(vh));
-      svg.dataset.size = key;
-    }
-
-    const groups = svg.querySelectorAll('.pick-crosshair');
-    const lines = svg.querySelectorAll('.pick-line');
-    let prevPoint = null;
-    this._pickPoints.forEach((p, index) => {
-      const screen = this.imageToScreen(p.px, p.py);
-      const g = groups[index];
-      if (g) g.setAttribute('transform', `translate(${n4(screen.x)} ${n4(screen.y)})`);
-      if (index > 0 && prevPoint) {
-        const line = lines[index - 1];
-        if (line) {
-          line.setAttribute('x1', String(n4(prevPoint.x)));
-          line.setAttribute('y1', String(n4(prevPoint.y)));
-          line.setAttribute('x2', String(n4(screen.x)));
-          line.setAttribute('y2', String(n4(screen.y)));
-        }
-      }
-      prevPoint = screen;
-    });
-  }
-
-  /* ====================================================================== */
   /* 事件：滚轮 / 指针 / 键盘                                                */
   /* ====================================================================== */
 
@@ -1758,8 +1619,7 @@ export class EditorCanvas {
 
     this._pinch = null;
 
-    // pick 模式：标记不参与选中 / 拖拽（点哪儿都算拾取）
-    const markerEl = this._mode === 'pick' ? null : this._markerFromTarget(event.target);
+    const markerEl = this._markerFromTarget(event.target);
     if (markerEl) {
       const id = String(markerEl.dataset.id);
       // 默认不允许直接拖动（避免不小心把点拖走）；「拖动移动」开关开启或按住 Alt 时才可拖
@@ -1962,15 +1822,14 @@ export class EditorCanvas {
     };
   }
 
-  /** 普通点击地图（未拖拽）：pick 模式回调 onPickPoint，其它模式回调 onEmptyClick */
+  /** 普通点击地图（未拖拽）：回调 onEmptyClick */
   _handleMapClick(event) {
     if (!this._imageSize) return; // 没有底图时不产生「地图点击」，避免 app 写进垃圾坐标
     const { px, py } = this.screenToImage(event.clientX, event.clientY);
     if (!isNum(px) || !isNum(py)) return;
     const world = this.imageToWorld(px, py);
     const info = { px, py, world };
-    if (this._mode === 'pick') safeCall(this._callbacks.onPickPoint, info);
-    else safeCall(this._callbacks.onEmptyClick, info);
+    safeCall(this._callbacks.onEmptyClick, info);
   }
 
   /** 指针悬停：上报世界坐标 + 更新坐标读数（拖拽中不更新） */
@@ -2018,8 +1877,6 @@ export class EditorCanvas {
   _onDoubleClick(event) {
     if (this._destroyed) return;
     if (this._isIgnoredTarget(event.target)) return;
-    // 拾取模式下双击就是两次取点，不要再缩放
-    if (this._mode === 'pick') return;
     event.preventDefault();
     this._cancelAnim();
     this._rect = this.container.getBoundingClientRect();

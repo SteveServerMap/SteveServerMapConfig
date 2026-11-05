@@ -54,12 +54,6 @@ const state = {
   /** 撤销栈 */
   history: { past: [], future: [], limit: 50 },
 
-  /** 校准拾取：pendingPick = 'a' | 'b' | null；picks = { a:{px,py}, b:{px,py} } */
-  pendingPick: null,
-  pickHandler: null,
-  pickExitHook: null,
-  picks: { a: null, b: null },
-
   /** 暗图提亮：enhancePref = null 表示按图片亮度自动判断 */
   enhancePref: null,
   enhanceOn: false,
@@ -261,7 +255,6 @@ function initCanvas() {
       const el = $('zoom-level');
       if (el && vs) el.textContent = `${Math.round((vs.scale || 0) * 100)}%`;
     },
-    onPickPoint: ({ px, py, world }) => handlePickPoint({ px, py, world }),
     onMarkerClick: (id) => {
       handleSelect({
         dimensionId: state.selection.dimensionId,
@@ -280,7 +273,6 @@ function initCanvas() {
       toast(`已移动到 X ${wp.x} · Z ${wp.z}`, 'ok', 1500);
     },
     onEmptyClick: ({ world }) => {
-      if (state.pendingPick) return;
       if (state.createArmed) {
         const created = createWaypointAt(world, { prefix: '新路径点' });
         disarmCreate();
@@ -372,7 +364,6 @@ async function activateDimension(dimensionId) {
   const token = ++state.loadToken;
   disarmCreate();
   disarmPlacement();
-  exitPickMode();
   state.loadingDimension = true;
   state.projection = null;
   state.imageSize = null;
@@ -395,7 +386,6 @@ async function activateDimension(dimensionId) {
   state.selection.dimensionId = dim.id;
   state.selection.waypointId = null;
   state.selection.groupId = null;
-  state.picks = { a: null, b: null, origin: null };
   updatePickPositionButton();
 
   let size = null;
@@ -524,7 +514,7 @@ async function loadTilesFor(dim, token) {
 
 /**
  * 瓦片维度没有有效画幅时，用 manifest 的世界范围补一份 calibration。
- * （只影响单图兜底 / 校准面板显示；标记定位本身走 manifest 投影。）
+ * （只影响单图兜底；标记定位本身走 manifest 投影。）
  */
 function ensureCalibrationFromTiles(dim, tileset) {
   const cal = dim.calibration || {};
@@ -554,7 +544,7 @@ function ensureCalibration(dim, size) {
     zMin: -Math.round(size.height / 2),
     zMax: Math.round(size.height / 2),
     flipZ: cal.flipZ === true,
-    note: '按「1 像素 = 1 方块、图片中心 = 世界 (0,0)」自动推定，请用两点校准核对',
+    note: '按「1 像素 = 1 方块、图片中心 = 世界 (0,0)」自动推定；瓦片底图可忽略本字段',
   };
 }
 
@@ -864,11 +854,7 @@ function handlePatch(patch) {
         handleTilesPatch(dim, patch);
         return;
       }
-      if (String(patch.field).startsWith('calibration.')) {
-        const key = String(patch.field).slice('calibration.'.length);
-        dim.calibration = dim.calibration || {};
-        dim.calibration[key] = key === 'flipZ' ? patch.value === true : key === 'calibrated' ? patch.value === true : coerce(key, patch.value);
-      } else if (patch.field === 'defaultDimension') {
+      if (patch.field === 'defaultDimension') {
         state.draft.defaultDimension = patch.value;
       } else {
         if (patch.field === 'id' && state.draft.defaultDimension === dim.id) {
@@ -924,7 +910,7 @@ function handleTilesPatch(dim, patch) {
   activateDimension(dim.id);
   if (wasTiles !== nowTiles) {
     toast(
-      nowTiles ? '已切换到瓦片底图，正在读取 manifest…' : '已切换到单图底图（PNG + 画幅校准）',
+      nowTiles ? '已切换到瓦片底图，正在读取 manifest…' : '已切换到单图底图（PNG）',
       'info',
       2600,
     );
@@ -1154,8 +1140,6 @@ async function handleAction(name, actionEl) {
       return armCreateOnMap();
     case 'drag-move':
       return toggleDragMove();
-    case 'goto-calibrate':
-      return openCalibrationDialog();
     case 'generate-xaero-tiles':
       return generateXaeroTilesFromSource(actionEl && actionEl.dataset ? actionEl.dataset.xaeroFolder : '');
     case 'refresh-xaero':
@@ -1323,15 +1307,14 @@ async function importImage(file) {
   setStatus(`正在导入 ${name}…`, 'info');
   try {
     const res = await api('/api/import-image', { method: 'POST', body: { fileName: name, dataUrl } });
-    pushHistory();
-    dim.image = res.name;
-    dim.calibration = dim.calibration || {};
-    await refreshImageList();
-    const result = currentDimension() === dim ? await activateDimension(dim.id) : null;
-    const size = result?.size;
-    commit({ structural: true });
-    setStatus(`已导入 ${res.name}（${res.width}×${res.height}${res.backup ? `，原文件备份 ${res.backup}` : ''}）`, size ? 'ok' : 'warn');
-    toast(`已导入 ${res.name}；记得重新校准画幅`, 'ok', 4000);
+  pushHistory();
+  dim.image = res.name;
+  await refreshImageList();
+  const result = currentDimension() === dim ? await activateDimension(dim.id) : null;
+  const size = result?.size;
+  commit({ structural: true });
+  setStatus(`已导入 ${res.name}（${res.width}×${res.height}${res.backup ? `，原文件备份 ${res.backup}` : ''}）`, size ? 'ok' : 'warn');
+  toast(`已导入 ${res.name}`, 'ok', 4000);
   } catch (err) {
     setStatus(`导入失败：${err.message}`, 'error');
     toast(`导入失败：${err.message}`, 'error', 5000);
@@ -1503,8 +1486,6 @@ function armCreateOnMap() {
   }
   state.placeFor = null;
   state.createArmed = true;
-  state.pendingPick = null;
-  state.pickHandler = null;
   canvas?.setMode?.('place');
   const badge = $('mode-badge');
   if (badge) {
@@ -1527,8 +1508,6 @@ function disarmCreate() {
 function armPlacement(waypointId, name) {
   disarmCreate();
   state.placeFor = waypointId;
-  state.pendingPick = null;
-  state.pickHandler = null;
   canvas?.setMode?.('place');
   const badge = $('mode-badge');
   if (badge) {
@@ -1667,7 +1646,7 @@ function newDimension() {
   state.selection = { dimensionId: dim.id, waypointId: null, groupId: null };
   commit({ structural: true });
   activateDimension(dim.id);
-  toast('已新建维度：先在右侧选基底图，再校准画幅', 'ok', 4000);
+  toast('已新建维度：先在右侧选基底图（瓦片底图无需画幅校准）', 'ok', 4000);
 }
 
 async function deleteDimension() {
@@ -1709,407 +1688,6 @@ function cycleLabels() {
   canvas?.setLabelMode(state.draft.ui.labelMode);
   commit({ structural: true });
   toast({ hover: '标签：悬停显示', always: '标签：始终显示', never: '标签：全部隐藏' }[state.draft.ui.labelMode], 'info', 1600);
-}
-
-/* ------------------------------ 校准 ------------------------------ */
-
-function openCalibrationDialog() {
-  const dim = currentDimension();
-  if (!dim) return toast('先选一个维度', 'warn');
-  if (!dim.imageMeta?.width) return toast('该维度还没有基底图，先导入图片', 'warn');
-
-  const coords = state.coords;
-  if (!coords) return toast('站点坐标模块未载入，无法校准', 'error');
-
-  state.picks = { a: null, b: null, origin: null };
-  const modal = buildCalibrationDialog(dim, coords);
-  document.body.appendChild(modal);
-}
-
-/** 校准对话框（自包含，样式内联，避免依赖 tool.css 的类名） */
-function buildCalibrationDialog(dim, coords) {
-  const overlay = document.createElement('div');
-  overlay.className = 'cal-dialog';
-  Object.assign(overlay.style, {
-    position: 'fixed', inset: '0', zIndex: '80',
-    display: 'grid', placeItems: 'center',
-    // 不要 backdrop 模糊：校准时用户要在地图上找地标、点像素，模糊会让点不准
-    background: 'rgba(6, 9, 7, .5)',
-    backdropFilter: 'none',
-  });
-
-  const box = document.createElement('div');
-  overlay.appendChild(box);
-  Object.assign(box.style, {
-    width: 'min(560px, 92vw)', maxHeight: '86vh', overflow: 'auto',
-    background: 'var(--panel, #141a15)', color: 'var(--text, #e8efe8)',
-    border: '1px solid var(--border, #2b352c)', borderRadius: '16px',
-    padding: '18px 20px', boxShadow: '0 24px 70px rgba(0,0,0,.6)',
-    font: '13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
-  });
-  box.innerHTML = `
-    <h2 style="margin:0 0 6px;font-size:16px;display:flex;gap:8px;align-items:center">🎯 校准「${escapeHtml(dim.name)}」的画幅</h2>
-    <p style="margin:0 0 12px;color:var(--muted,#93a394);font-size:12px;line-height:1.7">
-      在图上点两个<b>你知道精确世界坐标</b>的地标（出生点、传送门、主城中心…），填入它们的 X / Z。
-      两个点要尽量拉开，且不要在同一行或同一列。
-    </p>
-    <div style="display:grid;gap:10px">
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <button data-act="pick-a" style="padding:7px 12px;border-radius:9px;border:1px solid var(--accent,#5ad26f);background:transparent;color:var(--accent,#5ad26f);cursor:pointer">拾取 A</button>
-        <span data-slot="a-px" style="color:var(--muted,#93a394);font-variant-numeric:tabular-nums">尚未拾取</span>
-        <label style="display:flex;gap:6px;align-items:center">X <input data-slot="a-x" type="number" style="width:96px;padding:6px 8px;border-radius:8px;border:1px solid var(--border,#2b352c);background:#0e130f;color:inherit">
-        </label>
-        <label style="display:flex;gap:6px;align-items:center">Z <input data-slot="a-z" type="number" style="width:96px;padding:6px 8px;border-radius:8px;border:1px solid var(--border,#2b352c);background:#0e130f;color:inherit">
-        </label>
-      </div>
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <button data-act="pick-b" style="padding:7px 12px;border-radius:9px;border:1px solid var(--accent,#5ad26f);background:transparent;color:var(--accent,#5ad26f);cursor:pointer">拾取 B</button>
-        <span data-slot="b-px" style="color:var(--muted,#93a394);font-variant-numeric:tabular-nums">尚未拾取</span>
-        <label style="display:flex;gap:6px;align-items:center">X <input data-slot="b-x" type="number" style="width:96px;padding:6px 8px;border-radius:8px;border:1px solid var(--border,#2b352c);background:#0e130f;color:inherit">
-        </label>
-        <label style="display:flex;gap:6px;align-items:center">Z <input data-slot="b-z" type="number" style="width:96px;padding:6px 8px;border-radius:8px;border:1px solid var(--border,#2b352c);background:#0e130f;color:inherit">
-        </label>
-      </div>
-    </div>
-    <div data-slot="result" style="margin-top:12px;padding:10px 12px;border-radius:10px;background:#10150f;border:1px solid var(--border,#2b352c);color:var(--muted,#93a394);font-size:12px;font-variant-numeric:tabular-nums">填入两点后自动计算</div>
-
-    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border,#2b352c)">
-      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-        <b>或者：只指定世界原点 (0,0)</b>
-        <span style="color:var(--muted,#93a394);font-size:12px">知道「哪一格是 (0,0)」+「每方块占几像素」就够了</span>
-      </div>
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px">
-        <button data-act="pick-origin" style="padding:7px 12px;border-radius:9px;border:1px solid var(--accent,#5ad26f);background:transparent;color:var(--accent,#5ad26f);cursor:pointer">拾取原点</button>
-        <span data-slot="origin-px" style="color:var(--muted,#93a394);font-variant-numeric:tabular-nums">尚未拾取</span>
-        <label style="display:flex;gap:6px;align-items:center">每方块
-          <input data-slot="origin-scale" type="number" step="any" min="0.001" style="width:84px;padding:6px 8px;border-radius:8px;border:1px solid var(--border,#2b352c);background:#0e130f;color:inherit">
-          像素
-        </label>
-        <label style="display:flex;gap:6px;align-items:center">
-          <input data-slot="origin-flip" type="checkbox"> 南北翻转
-        </label>
-      </div>
-      <div data-slot="origin-result" style="margin-top:10px;padding:10px 12px;border-radius:10px;background:#10150f;border:1px solid var(--border,#2b352c);color:var(--muted,#93a394);font-size:12px;font-variant-numeric:tabular-nums">先拾取原点</div>
-      <div style="display:flex;justify-content:flex-end;margin-top:10px">
-        <button data-act="apply-origin" style="padding:7px 14px;border-radius:9px;border:1px solid var(--accent,#5ad26f);background:transparent;color:var(--accent,#5ad26f);font-weight:600;cursor:pointer" disabled>按原点应用</button>
-      </div>
-    </div>
-
-    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px">
-      <button data-act="cancel" style="padding:8px 14px;border-radius:9px;border:1px solid var(--border,#2b352c);background:transparent;color:inherit;cursor:pointer">取消</button>
-      <button data-act="apply" style="padding:8px 14px;border-radius:9px;border:1px solid var(--accent,#5ad26f);background:var(--accent,#5ad26f);color:#0b110c;font-weight:600;cursor:pointer" disabled>应用并关闭</button>
-    </div>`;
-
-  const slot = (name) => box.querySelector(`[data-slot="${name}"]`);
-  const applyBtn = box.querySelector('[data-act="apply"]');
-  let solved = null;
-
-  const close = () => {
-    exitPickMode();
-    setPickingUI(false);
-    if (hintEl) {
-      hintEl.remove();
-      hintEl = null;
-    }
-    overlay.remove();
-  };
-
-  /**
-   * 拾取模式下让对话框「让路」：整层 pointer-events:none + 面板淡化，
-   * 这样点击能落到画布上；同时底部浮出一个小提示条（唯一可点元素）。
-   */
-  let hintEl = null;
-  const setPickingUI = (on, label = '') => {
-    overlay.style.pointerEvents = on ? 'none' : 'auto';
-    box.style.pointerEvents = on ? 'none' : 'auto';
-    // 拾取时把对话框彻底藏起来（不是半透明残留），背景也几乎不压暗，
-    // 这样地图保持 100% 清晰，才能点准地标像素。
-    box.style.opacity = on ? '0' : '1';
-    box.style.visibility = on ? 'hidden' : 'visible';
-    box.style.filter = 'none';
-    box.style.transition = 'opacity .18s ease';
-    overlay.style.background = on ? 'rgba(6, 9, 7, .08)' : 'rgba(6, 9, 7, .5)';
-    overlay.style.backdropFilter = 'none';
-    document.body.dataset.picking = on ? '1' : '0';
-    if (on) {
-      if (!hintEl) {
-        hintEl = document.createElement('div');
-        Object.assign(hintEl.style, {
-          position: 'fixed', left: '50%', bottom: '28px', transform: 'translateX(-50%)',
-          zIndex: '90', pointerEvents: 'auto', display: 'flex', gap: '10px', alignItems: 'center',
-          padding: '10px 16px', borderRadius: '999px', border: '1px solid #2b352c',
-          background: 'rgba(18, 24, 19, .94)', color: '#e8efe8',
-          font: '13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
-          boxShadow: '0 12px 36px rgba(0,0,0,.55)',
-        });
-        hintEl.innerHTML =
-          '<span style="width:8px;height:8px;border-radius:50%;background:#5ad26f"></span>' +
-          '<span data-slot="hint-text"></span>' +
-          '<button data-act="cancel-pick" type="button" style="padding:4px 10px;border-radius:999px;border:1px solid #2b352c;background:transparent;color:#93a394;cursor:pointer">取消拾取</button>';
-        document.body.appendChild(hintEl);
-        hintEl.querySelector('[data-act="cancel-pick"]').addEventListener('click', () => exitPickMode());
-      }
-      hintEl.hidden = false;
-      hintEl.querySelector('[data-slot="hint-text"]').textContent = `点击地图拾取地标 ${label} · Esc 取消`;
-    } else if (hintEl) {
-      hintEl.hidden = true;
-    }
-  };
-
-  const recompute = () => {
-    const a = state.picks.a;
-    const b = state.picks.b;
-    const ax = Number(slot('a-x').value);
-    const az = Number(slot('a-z').value);
-    const bx = Number(slot('b-x').value);
-    const bz = Number(slot('b-z').value);
-    const result = slot('result');
-    if (!a || !b) {
-      result.textContent = '先拾取 A、B 两个点';
-      result.style.color = 'var(--muted, #93a394)';
-      applyBtn.disabled = true;
-      solved = null;
-      return;
-    }
-    if (![ax, az, bx, bz].every(Number.isFinite)) {
-      result.textContent = '请填写 A、B 两点的世界 X / Z';
-      result.style.color = 'var(--muted, #93a394)';
-      applyBtn.disabled = true;
-      solved = null;
-      return;
-    }
-    let res = null;
-    try {
-      res = coords.calibrationFromTwoPoints(
-        { px: a.px, py: a.py, x: ax, z: az },
-        { px: b.px, py: b.py, x: bx, z: bz },
-        { imageWidth: dim.imageMeta.width, imageHeight: dim.imageMeta.height },
-      );
-    } catch (err) {
-      console.warn('[tool] 两点解算失败：', err);
-    }
-    if (!res) {
-      result.textContent = '两个点在图片上的 X 或 Y 几乎重合，解不出画幅；请换一对更分散的地标';
-      result.style.color = 'var(--danger, #ff6b6b)';
-      applyBtn.disabled = true;
-      solved = null;
-      return;
-    }
-    const ppbX = dim.imageMeta.width / (res.xMax - res.xMin);
-    const ppbZ = dim.imageMeta.height / (res.zMax - res.zMin);
-    const ratio = ppbX / ppbZ;
-    const suspicious = ratio < 0.85 || ratio > 1.18;
-    result.innerHTML =
-      `X：${res.xMin.toFixed(1)} → ${res.xMax.toFixed(1)}　` +
-      `${(1 / ppbX).toFixed(3)} 方块/像素<br>` +
-      `Z：${res.zMin.toFixed(1)} → ${res.zMax.toFixed(1)}　` +
-      `${(1 / ppbZ).toFixed(3)} 方块/像素` +
-      (suspicious ? '<br><span style="color:#ffbc4b">⚠ 两个方向的像素比例差得较多，检查地标坐标是否填错</span>' : '') +
-      (res.flipZ ? '<br><span style="color:#ffbc4b">检测到南北翻转，将自动置 flipZ = true</span>' : '');
-    result.style.color = 'var(--text, #e8efe8)';
-    solved = res;
-    applyBtn.disabled = false;
-  };
-
-  // 手填 / 修改 X、Z 时实时重算（否则「应用」永远不可用）
-  for (const name of ['a-x', 'a-z', 'b-x', 'b-z']) {
-    const el = slot(name);
-    if (!el) continue;
-    el.addEventListener('input', recompute);
-    el.addEventListener('change', recompute);
-  }
-  recompute();
-
-  /* ---------------- 原点模式：只指定世界 (0,0) 在哪一格 + 每方块像素数 ---------------- */
-
-  // 默认「每方块像素数」取自当前画幅（帧宽 / 世界跨度），新建维度则退化为 1
-  const currentPxPerBlock = () => {
-    const cal = dim.calibration || {};
-    const xMin = Number(cal.xMin);
-    const xMax = Number(cal.xMax);
-    if (Number.isFinite(xMin) && Number.isFinite(xMax) && xMax > xMin) {
-      return dim.imageMeta.width / (xMax - xMin);
-    }
-    return 1;
-  };
-  const scaleEl = slot('origin-scale');
-  if (scaleEl && !scaleEl.value) scaleEl.value = String(Number(currentPxPerBlock().toFixed(4)));
-
-  let originSolved = null;
-
-  const recomputeOrigin = () => {
-    const out = slot('origin-result');
-    const applyOriginBtn = box.querySelector('[data-act="apply-origin"]');
-    const pick = state.picks.origin;
-    const pxPerBlock = Number(slot('origin-scale')?.value);
-    const flip = slot('origin-flip')?.checked === true;
-    const fail = (text) => {
-      out.textContent = text;
-      out.style.color = 'var(--muted, #93a394)';
-      applyOriginBtn.disabled = true;
-      originSolved = null;
-    };
-    if (!pick) return fail('先点「拾取原点」，在地图上点一下世界坐标 (0,0) 的位置');
-    if (!Number.isFinite(pxPerBlock) || pxPerBlock <= 0) {
-      return fail('请填「每方块像素数」：多数离线图是 1，二倍渲染图填 2');
-    }
-    const blocksPerPixel = 1 / pxPerBlock;
-    const W = dim.imageMeta.width;
-    const H = dim.imageMeta.height;
-    const xMin = -pick.px * blocksPerPixel;
-    const xMax = xMin + W * blocksPerPixel;
-    let zMin;
-    let zMax;
-    if (flip) {
-      zMax = pick.py * blocksPerPixel;
-      zMin = zMax - H * blocksPerPixel;
-    } else {
-      zMin = -pick.py * blocksPerPixel;
-      zMax = zMin + H * blocksPerPixel;
-    }
-    originSolved = { xMin, xMax, zMin, zMax, flipZ: flip, pxPerBlock };
-    out.innerHTML =
-      `X：${xMin.toFixed(1)} → ${xMax.toFixed(1)}<br>` +
-      `Z：${zMin.toFixed(1)} → ${zMax.toFixed(1)}<br>` +
-      `<span style="color:var(--muted,#93a394)">每方块 ${pxPerBlock} 像素 · 原点像素 (${Math.round(pick.px)}, ${Math.round(pick.py)})</span>`;
-    out.style.color = 'var(--text, #e8efe8)';
-    applyOriginBtn.disabled = false;
-  };
-
-  scaleEl?.addEventListener('input', recomputeOrigin);
-  scaleEl?.addEventListener('change', recomputeOrigin);
-  slot('origin-flip')?.addEventListener('change', recomputeOrigin);
-  recomputeOrigin();
-
-  box.addEventListener('click', (event) => {
-    const act = event.target.closest('[data-act]')?.dataset.act;
-    if (!act) return;
-    if (act === 'cancel') return close();
-    if (act === 'pick-a' || act === 'pick-b') {
-      const which = act === 'pick-a' ? 'a' : 'b';
-      // 拾取时必须让对话框「隐形让路」，否则全屏遮罩会把画布点击全吃掉
-      state.pickExitHook = () => setPickingUI(false);
-      setPickingUI(true, which.toUpperCase());
-      beginPick(which, (point) => {
-        slot(`${which}-px`).textContent = `图片像素 (${Math.round(point.px)}, ${Math.round(point.py)})`;
-        canvas?.setPickPoints?.([state.picks.a, state.picks.b].filter(Boolean));
-        setPickingUI(false);
-        recompute();
-      });
-      return;
-    }
-    if (act === 'pick-origin') {
-      state.pickExitHook = () => setPickingUI(false);
-      setPickingUI(true, '(0,0)');
-      beginPick('origin', (point) => {
-        slot('origin-px').textContent = `图片像素 (${Math.round(point.px)}, ${Math.round(point.py)})`;
-        canvas?.setPickPoints?.([state.picks.a, state.picks.b, state.picks.origin].filter(Boolean));
-        setPickingUI(false);
-        recomputeOrigin();
-      });
-      return;
-    }
-    if (act === 'apply-origin' && originSolved) {
-      pushHistory();
-      dim.calibration = {
-        calibrated: true,
-        xMin: Number(originSolved.xMin.toFixed(3)),
-        xMax: Number(originSolved.xMax.toFixed(3)),
-        zMin: Number(originSolved.zMin.toFixed(3)),
-        zMax: Number(originSolved.zMax.toFixed(3)),
-        flipZ: originSolved.flipZ === true,
-        note: `按世界原点 (0,0) · 每方块 ${originSolved.pxPerBlock} 像素 · 图片 ${dim.imageMeta.width}×${dim.imageMeta.height}px · 由配置工具生成`,
-      };
-      canvas?.setPickPoints?.([]);
-      commit({ structural: true });
-      toast('已按原点 (0,0) 设置画幅；记得点「保存到站点」', 'ok', 4000);
-      close();
-      return;
-    }
-    if (act === 'apply' && solved) {
-      pushHistory();
-      dim.calibration = {
-        calibrated: true,
-        xMin: Number(solved.xMin.toFixed(3)),
-        xMax: Number(solved.xMax.toFixed(3)),
-        zMin: Number(solved.zMin.toFixed(3)),
-        zMax: Number(solved.zMax.toFixed(3)),
-        flipZ: solved.flipZ === true,
-        note: `两点校准 · 图片 ${dim.imageMeta.width}×${dim.imageMeta.height}px · 由配置工具生成`,
-      };
-      canvas?.setPickPoints?.([]);
-      commit({ structural: true });
-      toast('画幅已更新；点「保存到站点」写入 config.json', 'ok', 4000);
-      close();
-      return;
-    }
-    if (act === 'close') close();
-  });
-
-  box.querySelector('[data-act="cancel"]').addEventListener('click', close);
-  overlay.addEventListener('click', (event) => {
-    if (event.target === overlay) close();
-  });
-  const onKey = (event) => {
-    if (event.key === 'Escape') {
-      if (confirmResolver) {
-        settleConfirm(false);
-        return;
-      }
-      if (state.pendingPick) {
-        // 拾取中按 Esc：只退出拾取，不关闭对话框
-        exitPickMode();
-        event.stopPropagation();
-        return;
-      }
-      event.stopPropagation();
-      close();
-      document.removeEventListener('keydown', onKey, true);
-    }
-  };
-  document.addEventListener('keydown', onKey, true);
-  return overlay;
-}
-
-/** 进入拾取模式：下一次画布点击会回调 point 并自动退出 */
-function beginPick(which, cb) {
-  state.pendingPick = which;
-  state.pickHandler = cb;
-  canvas?.setMode?.('pick');
-  setStatus(`拾取模式：在地图上点「地标 ${which.toUpperCase()}」的位置（拖拽平移不会误触）`, 'warn');
-  const badge = $('mode-badge');
-  if (badge) {
-    badge.hidden = false;
-    badge.textContent = `拾取地标 ${which.toUpperCase()}：点击地图 · Esc 取消`;
-  }
-}
-
-function exitPickMode() {
-  if (!state.pendingPick) return;
-  state.pendingPick = null;
-  state.pickHandler = null;
-  canvas?.setMode?.('select');
-  const badge = $('mode-badge');
-  if (badge) badge.hidden = true;
-  const hook = state.pickExitHook;
-  state.pickExitHook = null;
-  if (typeof hook === 'function') {
-    try {
-      hook();
-    } catch (err) {
-      console.warn('[tool] 拾取退出回调出错：', err);
-    }
-  }
-}
-
-function handlePickPoint({ px, py }) {
-  if (!state.pendingPick) return;
-  const which = state.pendingPick;
-  state.picks[which] = { px, py };
-  const cb = state.pickHandler;
-  exitPickMode();
-  setStatus(`已拾取地标 ${which.toUpperCase()}，填它的世界坐标`, 'info');
-  if (cb) cb({ px, py });
 }
 
 /* ------------------------------ 预览 ------------------------------ */
@@ -2206,10 +1784,6 @@ function hideCanvasEmpty() {
   if (el) el.hidden = true;
 }
 
-function escapeHtml(text) {
-  return String(text).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
-}
-
 /* ============================== 通用事件 ============================== */
 
 async function api(path, { method = 'GET', body } = {}) {
@@ -2262,10 +1836,6 @@ function bindKeyboard() {
       return;
     }
     if (event.key === 'Escape') {
-      if (state.pendingPick) {
-        exitPickMode();
-        setStatus('已退出拾取模式', 'info');
-      }
       if (state.placeFor) {
         disarmPlacement();
         setStatus('已退出放置模式（路径点仍在原位）', 'info');
@@ -2344,7 +1914,7 @@ function bindKeyboard() {
 /* ============================== 调试接口（供 QA / 控制台使用） ============================== */
 
 /**
- * 调试/自动化接口。QA（tests/e2e.mjs）用它读取草稿、调用同一套保存/预览/校准代码路径，
+ * 调试/自动化接口。QA（tests/e2e.mjs）用它读取草稿、调用同一套保存/预览代码路径，
  * 真实交互（按钮点击、画布点击）仍然走 DOM 事件。
  */
 function api2tool() {
@@ -2356,8 +1926,6 @@ function api2tool() {
     save: () => saveToSite(),
     preview: () => openPreview(),
     action: (name) => handleAction(name),
-    calibrate: (a, b) => calibrateFromPoints(a, b),
-    setOrigin: (opts) => setOriginCalibration(opts || {}),
     armPlacement: (id) => {
       const dim = currentDimension();
       const wp = dim && model.waypointById(dim, id || state.selection.waypointId);
@@ -2396,15 +1964,6 @@ function api2tool() {
     deleteGroup,
     newDimension,
     deleteDimension,
-    openCalibration: openCalibrationDialog,
-    setCalibration: (cal) => {
-      const dim = currentDimension();
-      if (!dim) return null;
-      pushHistory();
-      dim.calibration = { ...dim.calibration, ...cal };
-      commit({ structural: true });
-      return dim.calibration;
-    },
     undo,
     redo,
     toast,
@@ -2412,57 +1971,6 @@ function api2tool() {
       return panel;
     },
   };
-}
-
-/** 按「世界原点 (0,0) 所在像素 + 每方块像素数」反推画幅（对话框原点模式 / 自动化测试共用） */
-function setOriginCalibration({ px, py, pxPerBlock = 1, flipZ = false } = {}) {
-  const dim = currentDimension();
-  if (!dim || !dim.imageMeta?.width) return { ok: false, error: '缺少维度或图片尺寸' };
-  const blocksPerPixel = 1 / Number(pxPerBlock);
-  if (!Number.isFinite(blocksPerPixel) || blocksPerPixel <= 0) return { ok: false, error: '每方块像素数无效' };
-  const W = dim.imageMeta.width;
-  const H = dim.imageMeta.height;
-  const xMin = -px * blocksPerPixel;
-  const xMax = xMin + W * blocksPerPixel;
-  const zMin = flipZ ? py * blocksPerPixel - H * blocksPerPixel : -py * blocksPerPixel;
-  const zMax = zMin + H * blocksPerPixel;
-  pushHistory();
-  dim.calibration = {
-    calibrated: true,
-    xMin: Number(xMin.toFixed(3)),
-    xMax: Number(xMax.toFixed(3)),
-    zMin: Number(zMin.toFixed(3)),
-    zMax: Number(zMax.toFixed(3)),
-    flipZ: flipZ === true,
-    note: '按世界原点 (0,0) · 每方块 ' + pxPerBlock + ' 像素 · 图片 ' + W + 'x' + H + 'px · 由配置工具生成',
-  };
-  commit({ structural: true });
-  return { ok: true, calibration: dim.calibration };
-}
-
-/** 两点反解并直接应用（与校准对话框同一套数学），供自动化测试/控制台调用 */
-function calibrateFromPoints(a, b) {
-  const dim = currentDimension();
-  const coords = state.coords;
-  if (!dim || !coords || !dim.imageMeta?.width) return { ok: false, error: '缺少维度或图片尺寸' };
-  const res = coords.calibrationFromTwoPoints(
-    { px: Number(a.px), py: Number(a.py), x: Number(a.x), z: Number(a.z) },
-    { px: Number(b.px), py: Number(b.py), x: Number(b.x), z: Number(b.z) },
-    { imageWidth: dim.imageMeta.width, imageHeight: dim.imageMeta.height },
-  );
-  if (!res) return { ok: false, error: '两个点在图片上的同一轴几乎重合，解不出画幅' };
-  pushHistory();
-  dim.calibration = {
-    calibrated: true,
-    xMin: Number(res.xMin.toFixed(3)),
-    xMax: Number(res.xMax.toFixed(3)),
-    zMin: Number(res.zMin.toFixed(3)),
-    zMax: Number(res.zMax.toFixed(3)),
-    flipZ: res.flipZ === true,
-    note: `两点校准 · 图片 ${dim.imageMeta.width}×${dim.imageMeta.height}px · 由配置工具生成`,
-  };
-  commit({ structural: true });
-  return { ok: true, calibration: dim.calibration };
 }
 
 export { state, api, saveToSite as save };

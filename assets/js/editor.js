@@ -36,13 +36,9 @@ const LABEL_OPTIONS = [
 const MODE_TEXT = {
   select: '',
   place: '放置模式 · 点击画布放置路径点',
-  pick: '拾取模式 · 依次点击两个已知地标',
 };
-/** 维度「画幅校准」区块的说明：瓦片模式下 calibration 只用于单图兜底（app.js 会按类型原地替换）。 */
-const CAL_HINT_SINGLE = '世界坐标映射到图片像素的边界；改动画幅后请重新校准。';
-const CAL_HINT_TILES = '瓦片底图的世界范围来自 manifest；下面的 calibration 只用于瓦片加载失败时的单图兜底。';
 const TILES_MODE_OPTIONS = [
-  ['image', '单图（PNG + 画幅校准）'],
+  ['image', '单图（PNG）'],
   ['tiles', '瓦片（manifest 清单）'],
 ];
 const TONE_SET = new Set(['info', 'ok', 'warn', 'error']);
@@ -1067,16 +1063,11 @@ export class EditorPanel {
     newWaypoint.title = '在画布中心新建路径点，然后在画布上点一下定位';
     const newGroup = button('+ 分组', 'new-group');
     newGroup.setAttribute('aria-label', '新建分组');
-    const calibrate = button('校准', 'goto-calibrate');
-    calibrate.id = 'btn-calibrate';
-    calibrate.setAttribute('aria-label', '打开画幅校准');
-    calibrate.title = '打开画幅校准（两点拾取 / 手动输入）';
 
     tools.append(
       newWaypoint,
       newGroup,
       button('+ 维度', 'new-dimension'),
-      calibrate,
     );
 
     const toggles = el('div', 'editor-toggles');
@@ -2019,7 +2010,7 @@ export class EditorPanel {
     return section;
   }
 
-  /** 就地切换「瓦片相关行」的可见性 + 画幅校准说明（不重建表单、不动数据）。 */
+  /** 就地切换「瓦片相关行」的可见性（不重建表单、不动数据）。 */
   _applyTilesModeView(isTiles) {
     const form = this.el.form;
     if (!form) return;
@@ -2029,11 +2020,6 @@ export class EditorPanel {
       // CSS 可能给 .form-row/.form-section 设了 display，hidden 属性会被覆盖，这里再兜一层。
       if (on) node.style.removeProperty('display');
       else node.style.display = 'none';
-    }
-    const calHint = form.querySelector('[data-tiles-cal]');
-    if (calHint) {
-      const next = on ? calHint.dataset.hintTiles : calHint.dataset.hintSingle;
-      if (next && calHint.textContent !== next) calHint.textContent = next;
     }
   }
 
@@ -2077,7 +2063,6 @@ export class EditorPanel {
     form.dataset.dimensionId = str(ctx.dim.id);
 
     const dim = ctx.dim;
-    const calibration = dim.calibration && typeof dim.calibration === 'object' ? dim.calibration : {};
     const isTiles = this._isTilesDimension(dim);
 
     form.appendChild(this._row(
@@ -2106,7 +2091,7 @@ export class EditorPanel {
         : '站点目录里的地图文件；不在列表中的名字保存后站点会显示「地图还没上传」。',
     ));
 
-    // 底图类型：单图（PNG + 画幅校准）/ 瓦片（manifest）——app.js 按 `tiles.mode` 处理
+    // 底图类型：单图（PNG）/ 瓦片（manifest）——app.js 按 `tiles.mode` 处理
     form.appendChild(this._row(
       '底图类型',
       makeSelect({
@@ -2115,7 +2100,7 @@ export class EditorPanel {
         value: isTiles ? 'tiles' : 'image',
         options: TILES_MODE_OPTIONS,
       }),
-      '瓦片模式按 manifest 的 worldBlockRange 定位，不再需要手动画幅校准。',
+      '瓦片模式按 manifest 的 worldBlockRange 定位，无需画幅校准。',
     ));
 
     // 瓦片清单：只读 manifest 路径，app.js 会通过 /preview/ 拉取并解析。
@@ -2154,60 +2139,6 @@ export class EditorPanel {
       form.appendChild(el('p', 'form-hint', `图片尺寸：${meta.width} × ${meta.height}${meta.missing ? ' · 文件缺失' : ''}`));
     }
 
-    // 瓦片模式：画幅来自 manifest，calibration 只是单图兜底（字段仍可编辑）
-    const calSection = this._section('画幅校准', isTiles ? CAL_HINT_TILES : CAL_HINT_SINGLE);
-    const calHint = calSection.querySelector('.form-hint');
-    if (calHint) {
-      calHint.dataset.tilesCal = '1';
-      calHint.dataset.hintSingle = CAL_HINT_SINGLE;
-      calHint.dataset.hintTiles = CAL_HINT_TILES;
-    }
-    form.appendChild(calSection);
-    const grid = el('div', 'form-grid form-grid-2');
-    const calFields = [
-      ['左边界 X', 'dim-xmin', 'calibration.xMin', calibration.xMin],
-      ['右边界 X', 'dim-xmax', 'calibration.xMax', calibration.xMax],
-      ['上边界 Z', 'dim-zmin', 'calibration.zMin', calibration.zMin],
-      ['下边界 Z', 'dim-zmax', 'calibration.zMax', calibration.zMax],
-    ];
-    for (const [label, key, field, value] of calFields) {
-      const cell = el('div', 'form-cell');
-      const lab = el('label', 'form-cell-label', label);
-      lab.htmlFor = controlId(key);
-      cell.append(lab, makeInput({
-        type: 'number',
-        key,
-        field,
-        value: Number.isFinite(value) ? value : null,
-        step: 'any',
-        inputmode: 'decimal',
-      }));
-      grid.appendChild(cell);
-    }
-    form.appendChild(this._row('边界', grid, '需满足 xMax > xMin、zMax > zMin。'));
-
-    form.appendChild(this._row(
-      '南北翻转',
-      makeCheckbox({ key: 'dim-flipz', field: 'calibration.flipZ', checked: calibration.flipZ === true, label: '图片上方是 +Z（南北翻转）' }),
-      null,
-    ));
-
-    form.appendChild(this._row(
-      '校准备注',
-      makeInput({ key: 'dim-note', field: 'calibration.note', value: str(calibration.note), placeholder: '可选：记录校准依据' }),
-      null,
-    ));
-
-    const calState = el('div', 'form-cal-state');
-    calState.classList.add(calibration.calibrated === true ? 'is-ok' : 'is-warn');
-    calState.appendChild(el('span', 'form-cal-icon', calibration.calibrated === true ? '✓' : '!'));
-    calState.appendChild(el(
-      'span',
-      'form-cal-text',
-      calibration.calibrated === true ? '该维度已校准' : '该维度尚未校准，画布上的路径点位置可能不准',
-    ));
-    form.appendChild(calState);
-
     form.appendChild(this._section('标识'));
     form.appendChild(this._row(
       'ID',
@@ -2221,7 +2152,6 @@ export class EditorPanel {
 
     const actions = el('div', 'form-actions');
     actions.append(
-      this._actionButton('去校准', 'goto-calibrate'),
       this._actionButton('+ 新建分组', 'new-group'),
       this._actionButton('删除维度', 'delete-dimension', 'danger'),
     );

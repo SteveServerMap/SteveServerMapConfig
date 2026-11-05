@@ -804,16 +804,6 @@ body::before {
   border-top: 1px solid transparent;
 }
 
-#btn-calibrate {
-  border-color: rgba(255, 188, 75, 0.28);
-  color: #ffd894;
-}
-
-#btn-calibrate:hover {
-  border-color: rgba(255, 188, 75, 0.55);
-  background: var(--warn-soft);
-}
-
 /* ---- 配置树 ---- */
 .tree {
   display: flex;
@@ -1579,47 +1569,6 @@ body::before {
   padding-top: 6px;
 }
 
-/* 校准状态提示 */
-.form-cal-state {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-}
-
-.form-cal-state.is-ok {
-  border-color: var(--accent-line);
-  background: var(--accent-soft);
-  color: var(--accent-2);
-}
-
-.form-cal-state.is-warn {
-  border-color: rgba(255, 188, 75, 0.34);
-  background: var(--warn-soft);
-  color: #ffd894;
-}
-
-.form-cal-icon {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.12);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.form-cal-text {
-  flex: 1;
-  min-width: 0;
-  line-height: 1.45;
-}
-
 /* ============================== 08. 编辑画布 ============================== */
 .canvas-root {
   position: relative;
@@ -1646,19 +1595,11 @@ body::before {
   cursor: grabbing;
 }
 
-body[data-mode="pick"] .canvas-root {
-  cursor: crosshair;
-}
-
 body[data-mode="place"] .canvas-root {
   cursor: copy;
 }
 
 /* canvas.js 实际写在容器上的 data-canvas-mode */
-.canvas-root[data-canvas-mode="pick"] {
-  cursor: crosshair;
-}
-
 .canvas-root[data-canvas-mode="place"] {
   cursor: copy;
 }
@@ -1897,73 +1838,6 @@ body[data-mode="place"] .canvas-root {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(90, 210, 111, 0.16);
 }
 
-/* ---- 校准拾取 ---- */
-.pick-crosshair {
-  position: absolute;
-  z-index: 9;
-  width: 26px;
-  height: 26px;
-  margin: -13px 0 0 -13px;
-  border: 1.5px solid var(--accent);
-  border-radius: 50%;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 0 16px -2px var(--accent);
-  pointer-events: none;
-}
-
-.pick-crosshair::before,
-.pick-crosshair::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  background: var(--accent);
-  transform: translate(-50%, -50%);
-}
-
-.pick-crosshair::before {
-  width: 34px;
-  height: 1px;
-}
-
-.pick-crosshair::after {
-  width: 1px;
-  height: 34px;
-}
-
-.pick-line {
-  position: absolute;
-  z-index: 8;
-  height: 2px;
-  border-radius: 2px;
-  background: linear-gradient(90deg, var(--accent), rgba(90, 210, 111, 0.25));
-  box-shadow: 0 0 10px -2px var(--accent);
-  transform-origin: 0 50%;
-  pointer-events: none;
-}
-
-/* canvas.js 的拾取图层是内联 SVG（<svg class="canvas-pick-layer"> 里的 .pick-crosshair / .pick-line），
-   这里把上面给 HTML 元素用的尺寸/边框重置掉，并给 SVG 描边一个主题色。 */
-.canvas-pick-layer {
-  overflow: visible;
-  color: var(--accent);
-  pointer-events: none;
-  filter: drop-shadow(0 0 6px rgba(90, 210, 111, 0.55));
-}
-
-.canvas-pick-layer .pick-crosshair,
-.canvas-pick-layer .pick-line {
-  position: static;
-  width: auto;
-  height: auto;
-  margin: 0;
-  border: 0;
-  border-radius: 0;
-  background: none;
-  box-shadow: none;
-  transform-origin: 0 0;
-  pointer-events: none;
-}
-
 /* ---- 画布控件 ---- */
 .zoom-panel {
   position: absolute;
@@ -2050,11 +1924,6 @@ body[data-mode="place"] .canvas-root {
   white-space: nowrap;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
   transform: translateX(-50%);
-}
-
-.mode-badge[data-mode="pick"] {
-  border-color: rgba(255, 188, 75, 0.5);
-  color: #ffd894;
 }
 
 .mode-badge[data-mode="place"] {

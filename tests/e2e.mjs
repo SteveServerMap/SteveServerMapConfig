@@ -2,15 +2,14 @@
 /**
  * tests/e2e.mjs —— SteveServerMapConfig 端到端验收（零依赖，一条命令跑完）
  * =============================================================================
- * 覆盖 docs/CONTRACT.md §7 的 8 条验收标准，外加 10 项加固检查（共 18 项）：
+ * 覆盖 docs/CONTRACT.md §7 的 7 条验收标准，外加 10 项加固检查（共 17 项）：
  *   §7.1 server 启动 + GET /api/health 200
  *   §7.2 3 秒内渲染出配置树，无 console error / 未捕获异常 / HTTP≥400
  *   §7.3 树里的路径点数量与站点 config.json 一致（数量动态读取，站点配置由用户随时改）
- *   §7.4 两点校准解算误差 < 2 方块
- *   §7.5 新增路径点 → 画布交互 → 坐标进表单 → 保存 → 站点 config.json 合法
- *   §7.6 存在 error 时保存被阻止并提示
- *   §7.7 预览 iframe 渲染出「草稿」的路径点数量
- *   §7.8 越界写入（fileName: "../evil.png"）被 4xx 拒绝
+ *   §7.4 新增路径点 → 画布交互 → 坐标进表单 → 保存 → 站点 config.json 合法
+ *   §7.5 存在 error 时保存被阻止并提示
+ *   §7.6 预览 iframe 渲染出「草稿」的路径点数量
+ *   §7.7 越界写入（fileName: "../evil.png"）被 4xx 拒绝
  *   扩展：基底图「真的被画出来」（opacity/is-loaded + 截图亮度）、提亮按钮一次点击只翻转一次、
  *         放置模式 place、撤销/重做、保存备份 config.json.bak-*、JSON Schema 校验器自检、
  *         真实站点仓库零改动取证
@@ -1085,25 +1084,6 @@ function dimensionOf(config, id = 'overworld') {
   return dims.find((d) => d && String(d.id) === String(id)) || dims[0] || null;
 }
 
-/**
- * 写操作前的最后一道闸：任何会写 config.json 的检查都必须先过这里，
- * 防止「--url 指到真实仓库的服务器」这种情况下误伤真实站点。
- */
-function assertSafeWriteTarget(ctx, action = '写入 config.json') {
-  const site = path.resolve(String(ctx.siteDir || ''));
-  const real = path.resolve(OPT.siteRepo);
-  assert(site, `拒绝${action}：还不知道 siteDir（服务器没就绪）`);
-  assert(
-    site.toLowerCase() !== real.toLowerCase(),
-    `拒绝${action}：siteDir=${site} 就是真实站点仓库，e2e 只允许写临时副本`,
-  );
-  assert(
-    fs.existsSync(path.join(site, 'config.json')) || ctx.flags.saved,
-    `拒绝${action}：临时副本里找不到 config.json（${site}），目标可疑`,
-  );
-  return site;
-}
-
 function waypointsOf(config, dimId = 'overworld') {
   return dimensionOf(config, dimId)?.waypoints || [];
 }
@@ -1299,7 +1279,7 @@ async function checkSchemaSelfTest(ctx) {
 
   const broken = [{ id: 'x' }, { id: 'y', name: '缺 image' }];
   const brokenErrors = validateSchema(ctx.schema, { dimensions: broken });
-  assert(brokenErrors.length > 0, '校验器没有发现「维度缺 image」的坏配置，§7.5 的 schema 断言将失去意义');
+  assert(brokenErrors.length > 0, '校验器没有发现「维度缺 image」的坏配置，§7.4 的 schema 断言将失去意义');
 
   const noDims = validateSchema(ctx.schema, {});
   assert(noDims.length > 0, '校验器没有发现「缺少 dimensions」');
@@ -1950,348 +1930,12 @@ async function checkUndoRedo(ctx) {
   return `改名「${waypoint.name}」→「${renamed}」；Ctrl+Z ×${undoPresses + 1} 恢复原名；Ctrl+Shift+Z ×${redoPresses + 1} 再改回（每步都由草稿实测）`;
 }
 
-/* ------------------------------ §7.4 两点校准 ------------------------------ */
-
-/**
- * 在画布上点两个点，用「站点原画幅」反推它们的世界坐标，再把这些世界坐标喂给工具，
- * 解出的画幅必须回到站点原画幅（误差 < 2 方块）。
- *
- * 三条路径按优先级：
- *   1. 真实校准对话框：点「拾取 A/B」→ 画布点击 → 填 X/Z → 点「应用」
- *   2. 对话框被遮罩挡住 / 填值不重算时，用 __tool.canvas.screenToImage 取像素 + __tool.calibrate
- *   3. 都没有时直接用「屏幕坐标 → 图片像素」换算 + __tool.calibrate
- */
-async function checkCalibration(ctx) {
-  const page = ctx.page;
-  const original = ctx.originalCalibration;
-  assert(
-    original && Number.isFinite(original.xMin) && Number.isFinite(original.zMin),
-    '站点副本的 config.json 里读不到主世界画幅，无法做校准验收',
-  );
-
-  const facts = await domFacts(page);
-  const tileActive = Boolean(facts.tileStats && facts.tileStats.active && facts.tileStats.imageWidth > 0);
-  assert(
-    tileActive || facts.imageLoaded,
-    `画布底图未载入，无法校准（#canvas-image naturalWidth=${facts.imageNatural?.width ?? 0}，瓦片=${tileActive ? '激活' : '未激活'}）`,
-  );
-
-  // 选到主世界维度
-  const dimSel = await selectDimension(ctx, 'overworld', '主世界');
-  if (!dimSel.ok) ctx.report.warn('校准前切换维度失败', dmSelReason(dimSel));
-
-  const pointA = await canvasPointAt(page, 0.2, 0.22);
-  const pointB = await canvasPointAt(page, 0.8, 0.78);
-  // 以「当前底图的逻辑尺寸」为准（瓦片维度是 manifest 的 1 像素 = 1 方块，和单图 PNG 分辨率不同）
-  const imageSize = pointA.imageSize || facts.imageNatural;
-  assert(
-    Math.abs(pointA.px - pointB.px) > imageSize.width * 0.2 && Math.abs(pointA.py - pointB.py) > imageSize.height * 0.2,
-    `两个测试点太近（像素 ${Math.round(pointA.px)},${Math.round(pointA.py)} / ${Math.round(pointB.px)},${Math.round(pointB.py)}），反解会不稳`,
-  );
-
-  let path = null;
-  let pxA = { px: pointA.px, py: pointA.py };
-  let pxB = { px: pointB.px, py: pointB.py };
-
-  // ---------- 路径 1：真实校准对话框（点 #btn-calibrate → 拾取 A/B → 填 X/Z → 应用） ----------
-  const dialog = await openCalibrationDialog(ctx);
-  if (dialog.opened) {
-    const picks = await pickViaDialog(ctx, dialog, pointA, pointB);
-    if (picks.ok) {
-      pxA = picks.a;
-      pxB = picks.b;
-      const worldA = worldFromPixel(original, imageSize, pxA.px, pxA.py);
-      const worldB = worldFromPixel(original, imageSize, pxB.px, pxB.py);
-      const applied = await dialogFillAndApply(ctx, { worldA, worldB });
-      if (applied.ok) {
-        path = `真实校准对话框（${picks.via}；${applied.summary}）`;
-      } else {
-        ctx.report.warn('校准对话框不可用，退回 __tool.calibrate', applied.reason);
-        await closeCalibrationDialog(ctx);
-        const fb = await calibrateViaTool(ctx, pxA, pxB, original, imageSize);
-        assert(fb.ok, `两条校准路径都失败：${fb.reason}`);
-        path = `__tool.calibrate（对话框不可用：${applied.reason}）`;
-      }
-    } else {
-      ctx.report.warn('校准对话框拾取失败，退回 __tool.calibrate', picks.reason);
-      await closeCalibrationDialog(ctx);
-      const fb = await calibrateViaTool(ctx, pxA, pxB, original, imageSize);
-      assert(fb.ok, `两条校准路径都失败：${fb.reason}`);
-      path = `__tool.calibrate（对话框拾取失败：${picks.reason}）`;
-    }
-  } else {
-    const fb = await calibrateViaTool(ctx, pxA, pxB, original, imageSize);
-    assert(fb.ok, `找不到校准入口且 __tool.calibrate 不可用：${fb.reason}`);
-    path = `__tool.calibrate（没有校准入口：${dialog.reason}）`;
-  }
-
-  await page.settle(200);
-  const solved = await waitForConfig(
-    ctx,
-    (config) => {
-      const cal = dimensionOf(config)?.calibration || {};
-      return Number.isFinite(num(cal.xMin)) && Math.abs(num(cal.xMin) - original.xMin) < 200;
-    },
-    { timeout: 5000, label: '草稿里出现新的画幅' },
-  );
-
-  const cal = dimensionOf(solved.config).calibration || {};
-  assert(cal.calibrated === true, `校准后 calibrated 实际 ${JSON.stringify(cal.calibrated)} vs 期望 true`);
-
-  // 保存并把「落盘的画幅」当最终结果（契约：只要最终保存的 calibration 正确即可）
-  assertSafeWriteTarget(ctx, '§7.4 保存校准结果');
-  await clickAction(ctx, {
-    selectors: ['#btn-save'],
-    texts: ['保存到站点', '保存'],
-    toolAction: 'save',
-  });
-  await waitUntil(
-    async () => {
-      const saved = await readSiteConfigFile(ctx);
-      const savedCal = dimensionOf(saved.config)?.calibration || {};
-      return num(savedCal.xMin) !== num(ctx.originalCalibration.xMin) || savedCal.calibrated === true;
-    },
-    { timeout: 10_000, interval: 150, label: '站点 config.json 里出现校准结果' },
-  );
-
-  const savedConfig = await readSiteConfigFile(ctx);
-  const savedCal = dimensionOf(savedConfig.config)?.calibration || {};
-  const diff = {
-    xMin: Math.abs(num(savedCal.xMin) - original.xMin),
-    xMax: Math.abs(num(savedCal.xMax) - original.xMax),
-    zMin: Math.abs(num(savedCal.zMin) - original.zMin),
-    zMax: Math.abs(num(savedCal.zMax) - original.zMax),
-  };
-  const worst = Math.max(...Object.values(diff));
-  assert(
-    worst < 2,
-    `解出的画幅与站点原画幅误差 ${fmt(worst)} 方块（> 2）；` +
-      `实际 xMin=${fmt(savedCal.xMin)} xMax=${fmt(savedCal.xMax)} zMin=${fmt(savedCal.zMin)} zMax=${fmt(savedCal.zMax)}；` +
-      `期望 xMin=${fmt(original.xMin)} xMax=${fmt(original.xMax)} zMin=${fmt(original.zMin)} zMax=${fmt(original.zMax)}`,
-  );
-
-  ctx.flags.calibrated = true;
-  ctx.savedCalibration = savedCal;
-  return `${path}；解出 xMin=${fmt(savedCal.xMin)} xMax=${fmt(savedCal.xMax)} zMin=${fmt(savedCal.zMin)} zMax=${fmt(savedCal.zMax)}；最大误差 ${fmt(worst)} 方块（阈值 2）`;
-}
-
 function dmSelReason(sel) {
   return sel?.reason || sel?.how || '未知';
 }
 
-async function openCalibrationDialog(ctx) {
-  const page = ctx.page;
-  try {
-    const how = await clickAction(ctx, {
-      selectors: ['#btn-calibrate', '[data-action="goto-calibrate"]', '[data-act="calibrate"]'],
-      texts: ['校准画幅', '两点校准', '校准'],
-      toolAction: 'goto-calibrate',
-    });
-    const opened = await page
-      .waitFor(() => Boolean(document.querySelector('.cal-dialog')), {
-        timeout: 3000,
-        interval: 100,
-        label: '校准对话框出现',
-      })
-      .then(() => true)
-      .catch(() => false);
-    if (opened) return { opened: true, via: how };
-    return { opened: false, reason: `点击了「${how}」但 .cal-dialog 没出现` };
-  } catch (error) {
-    return { opened: false, reason: error.message };
-  }
-}
 
-/** 在真实对话框里点「拾取 A/B」再点画布，返回 app 自己算出的图片像素 */
-async function pickViaDialog(ctx, dialog, pointA, pointB) {
-  const page = ctx.page;
-  try {
-    const picked = {};
-    const hitNotes = [];
-    for (const [which, point] of [['a', pointA], ['b', pointB]]) {
-      const btn = await findClickable(page, { selectors: [`[data-act="pick-${which}"]`], texts: [] });
-      assert(btn, `校准对话框里找不到「拾取 ${which.toUpperCase()}」按钮（[data-act="pick-${which}"]）`);
-      await page.click(btn.cx, btn.cy);
-      await page.settle(180);
-
-      // 拾取模式下对话框必须「让路」：遮罩 pointer-events 变 none，光标处命中的应是画布
-      const probe = await page.evalFn((cx, cy) => {
-        const overlay = document.querySelector('.cal-dialog');
-        const hit = document.elementFromPoint(cx, cy);
-        const describe = (el) =>
-          el
-            ? `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${
-                typeof el.className === 'string' && el.className.trim() ? `.${el.className.trim().split(/\s+/)[0]}` : ''
-              }`
-            : null;
-        return {
-          overlayPointerEvents: overlay ? getComputedStyle(overlay).pointerEvents : null,
-          hit: describe(hit),
-          inCanvas: Boolean(hit && hit.closest('#canvas-root')),
-          hintText: (document.querySelector('[data-slot="hint-text"]')?.textContent || '').trim(),
-        };
-      }, point.cx, point.cy);
-      hitNotes.push(`${which.toUpperCase()}→${probe.hit}`);
-      if (!probe.inCanvas) {
-        return {
-          ok: false,
-          reason:
-            `点「拾取 ${which.toUpperCase()}」后画布点仍被挡住：命中 ${probe.hit}` +
-            `（遮罩 pointer-events=${probe.overlayPointerEvents}，提示条="${truncate(probe.hintText, 30)}"）`,
-        };
-      }
-
-      await page.click(point.cx, point.cy);
-      await page.settle(220);
-      const px = await page.evalFn((slotName) => {
-        const slot = document.querySelector(`[data-slot="${slotName}"]`);
-        const text = slot ? slot.textContent || '' : '';
-        const m = /\(([-\d.]+)\s*,\s*([-\d.]+)\)/.exec(text);
-        return m ? { px: Number(m[1]), py: Number(m[2]), text } : { text };
-      }, `${which}-px`);
-      if (!Number.isFinite(px.px)) {
-        return { ok: false, reason: `点击画布后 [data-slot="${which}-px"] 没有更新（内容="${truncate(px.text, 60)}"）` };
-      }
-      picked[which] = { px: px.px, py: px.py };
-
-      // 拾取完成后对话框应恢复可交互
-      const restored = await page.evalFn(() => {
-        const overlay = document.querySelector('.cal-dialog');
-        return overlay ? getComputedStyle(overlay).pointerEvents : null;
-      });
-      if (restored !== 'auto') {
-        return { ok: false, reason: `拾取 ${which.toUpperCase()} 后对话框遮罩没有恢复交互（pointer-events=${restored}）` };
-      }
-    }
-    return { ok: true, a: picked.a, b: picked.b, via: `CDP 在画布上点两处（${hitNotes.join(' / ')}）` };
-  } catch (error) {
-    return { ok: false, reason: error.message };
-  }
-}
-
-async function dialogFillAndApply(ctx, { worldA, worldB }) {
-  const page = ctx.page;
-  try {
-    const fields = [
-      ['a-x', worldA.x],
-      ['a-z', worldA.z],
-      ['b-x', worldB.x],
-      ['b-z', worldB.z],
-    ];
-    for (const [slot, value] of fields) {
-      await page.evalFn((slotName, val) => {
-        const el = document.querySelector(`[data-slot="${slotName}"]`);
-        if (!el) return false;
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-        if (setter) setter.call(el, String(val));
-        else el.value = String(val);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        return true;
-      }, slot, Math.round(value * 1000) / 1000);
-    }
-    await page.settle(160);
-
-    const state = await page.evalFn(() => {
-      const apply = document.querySelector('[data-act="apply"]');
-      const result = document.querySelector('[data-slot="result"]');
-      return {
-        disabled: apply ? apply.disabled : null,
-        resultText: result ? (result.innerText || '').trim().slice(0, 160) : '',
-      };
-    });
-    if (state.disabled !== false) {
-      return {
-        ok: false,
-        reason: `解算结果已出现，但「应用并关闭」仍是 disabled（result="${truncate(state.resultText, 80)}"）`,
-      };
-    }
-    if (!/X：/.test(state.resultText)) {
-      return { ok: false, reason: `填完 X/Z 后 [data-slot="result"] 没有出现解算结果（"${truncate(state.resultText, 80)}"）` };
-    }
-
-    const btn = await findClickable(page, { selectors: ['[data-act="apply"]'] });
-    assert(btn, '校准对话框里找不到「应用并关闭」按钮');
-    await page.click(btn.cx, btn.cy);
-    await page.settle(280);
-
-    const closed = await page.evalFn(() => !document.querySelector('.cal-dialog'));
-    const solvedLine = state.resultText.replace(/\s+/g, ' ').slice(0, 90);
-    return { ok: true, summary: `result="${solvedLine}"${closed ? '；对话框已自动关闭' : ''}` };
-  } catch (error) {
-    return { ok: false, reason: error.message };
-  }
-}
-
-async function closeCalibrationDialog(ctx) {
-  const page = ctx.page;
-  await page
-    .evalFn(() => {
-      const cancel = document.querySelector('.cal-dialog [data-act="cancel"]');
-      if (cancel) {
-        cancel.click();
-        return true;
-      }
-      const dialog = document.querySelector('.cal-dialog');
-      if (dialog) {
-        dialog.remove();
-        return true;
-      }
-      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      return false;
-    })
-    .catch(() => {});
-  await page.settle(150);
-}
-
-/** 用 canvas.screenToImage 取两个点的图片像素，再调 __tool.calibrate（与对话框同一套数学） */
-async function calibrateViaTool(ctx, pxAIn, pxBIn, original, imageSize) {
-  const page = ctx.page;
-  try {
-    // 先在画布上真的点两下（真实 CDP 鼠标事件），确保交互链路也被走过
-    const a = await canvasPointAt(page, 0.2, 0.22);
-    const b = await canvasPointAt(page, 0.8, 0.78);
-    await page.click(a.cx, a.cy);
-    await page.settle(150);
-    await page.click(b.cx, b.cy);
-    await page.settle(150);
-
-    const px = await page.evalFn((ax, ay, bx, by) => {
-      const tool = window.__tool;
-      const canvas = tool && tool.canvas;
-      if (canvas && typeof canvas.screenToImage === 'function') {
-        const A = canvas.screenToImage(ax, ay) || {};
-        const B = canvas.screenToImage(bx, by) || {};
-        if (Number.isFinite(A.px) && Number.isFinite(B.px)) {
-          return { ok: true, via: 'canvas.screenToImage', a: { px: A.px, py: A.py }, b: { px: B.px, py: B.py } };
-        }
-      }
-      return { ok: false, reason: 'canvas.screenToImage 不可用' };
-    }, a.cx, a.cy, b.cx, b.cy);
-    const baseA = px.ok ? px.a : pxAIn;
-    const baseB = px.ok ? px.b : pxBIn;
-
-    const worldA = worldFromPixel(original, imageSize, baseA.px, baseA.py);
-    const worldB = worldFromPixel(original, imageSize, baseB.px, baseB.py);
-
-    const applied = await page.evalFn((A, B) => {
-      const tool = window.__tool;
-      if (!tool || typeof tool.calibrate !== 'function') return { ok: false, reason: 'window.__tool.calibrate 不可用' };
-      const res = tool.calibrate(A, B);
-      if (res && typeof res.then === 'function') {
-        return res.then((r) => (r && r.ok === false ? { ok: false, reason: r.error || 'calibrate 返回失败' } : { ok: true, calibration: r && r.calibration }));
-      }
-      return res && res.ok === false ? { ok: false, reason: res.error || 'calibrate 返回失败' } : { ok: true, calibration: res && res.calibration };
-    }, { px: baseA.px, py: baseA.py, x: worldA.x, z: worldA.z }, { px: baseB.px, py: baseB.py, x: worldB.x, z: worldB.z });
-
-    if (!applied?.ok) return { ok: false, reason: applied?.reason || '未知' };
-    return { ok: true };
-  } catch (error) {
-    return { ok: false, reason: error.message };
-  }
-}
-
-/* ------------------------------ §7.5a 新增路径点 + 画布交互 ------------------------------ */
+/* ------------------------------ §7.4a 新增路径点 + 画布交互 ------------------------------ */
 
 async function checkNewWaypoint(ctx) {
   const page = ctx.page;
@@ -2447,7 +2091,7 @@ async function dragMarker(ctx, markerId, target) {
   }
 }
 
-/* ------------------------------ §7.5c 放置模式（place） ------------------------------ */
+/* ------------------------------ §7.4c 放置模式（place） ------------------------------ */
 
 /**
  * 交互语义（用户反馈后调整，本用例是它的回归）：
@@ -2460,7 +2104,7 @@ async function dragMarker(ctx, markerId, target) {
  */
 
 /**
- * §7.5d 「拖动移动」开关（用户反馈：鼠标能直接拖动路径点，容易误拖）：
+ * §7.4d 「拖动移动」开关（用户反馈：鼠标能直接拖动路径点，容易误拖）：
  *   ① 默认关闭：按住路径点拖动不改坐标；
  *   ② 点 #btn-drag-move 开启后可拖；
  *   ③ 关掉开关后按住 Alt 仍可临时拖。
@@ -2747,7 +2391,7 @@ async function checkPlaceMode(ctx) {
   );
 }
 
-/* ------------------------------ §7.5b 保存并校验站点 config.json ------------------------------ */
+/* ------------------------------ §7.4b 保存并校验站点 config.json ------------------------------ */
 
 async function checkSaveVerify(ctx) {
   const page = ctx.page;
@@ -2865,7 +2509,7 @@ async function checkBackup(ctx) {
   return `.backups/${latest.name}（${Buffer.byteLength(text)} 字节）：JSON.parse ✓、主世界 ${count} 个点（保存前状态）；共 ${backups.length} 份备份；根目录无散落 bak`;
 }
 
-/* ------------------------------ §7.6 保存被阻止 ------------------------------ */
+/* ------------------------------ §7.5 保存被阻止 ------------------------------ */
 
 async function checkSaveBlocked(ctx) {
   const page = ctx.page;
@@ -3034,14 +2678,14 @@ async function injectValidationError(ctx) {
   return { ok: false, reason: '既清不掉维度 id，也清不掉路径点名称（表单/__tool.patch 都不可用，校验器没报错）' };
 }
 
-/* ------------------------------ §7.7 预览 ------------------------------ */
+/* ------------------------------ §7.6 预览 ------------------------------ */
 
 async function checkPreview(ctx) {
   const page = ctx.page;
 
-  // 防御：前面的用例（尤其 §7.6 删维度 id）可能把维度弄丢，先把 id 修回来
+  // 防御：前面的用例（尤其 §7.5 删维度 id）可能把维度弄丢，先把 id 修回来
   const repaired = await repairDimensionIds(ctx);
-  if (repaired.changed) ctx.report.warn('预览前修复了被 §7.6 弄坏的维度 id', `现在是 ${JSON.stringify(repaired.ids)}`);
+  if (repaired.changed) ctx.report.warn('预览前修复了被 §7.5 弄坏的维度 id', `现在是 ${JSON.stringify(repaired.ids)}`);
 
   // 防御：前面的用例可能把 selection 弄丢，先确保停在主世界维度
   const dimSel = await selectDimension(ctx, 'overworld', '主世界');
@@ -3176,7 +2820,7 @@ async function checkPreview(ctx) {
   }
 }
 
-/* ------------------------------ §7.8 越界写入 ------------------------------ */
+/* ------------------------------ §7.7 越界写入 ------------------------------ */
 
 async function checkPathTraversal(ctx) {
   const tinyPng =
@@ -3224,7 +2868,7 @@ async function checkPathTraversal(ctx) {
  *   - 真实站点可能同时被用户正在运行的工具实例（默认端口 5273）写入，那种改动与本轮 e2e 无关，
  *     所以 **降级为 warning**，并列出前后 sha256 与 mtime；
  *   - 「e2e 自己没写到真实站点」由更硬的保证承担：临时副本 + `--data` 隔离 +
- *     `/api/health.siteDir`、`/api/state.dataDir` 三重断言 + 每次写前的 assertSafeWriteTarget()。
+ *     `/api/health.siteDir`、`/api/state.dataDir` 三重断言。
  */
 async function checkRealSiteUntouched(ctx) {
   const before = ctx.realSiteSnapshot;
@@ -3365,9 +3009,8 @@ function flagLabel(key) {
       server: '§7.1 服务器就绪',
       browser: '浏览器 + 页面打开',
       page: '§7.2 页面渲染通过',
-      waypointAdded: '§7.5a 新增路径点通过',
-      saved: '§7.5b 保存通过',
-      calibrated: '§7.4 校准通过',
+      waypointAdded: '§7.4a 新增路径点通过',
+      saved: '§7.4b 保存通过',
     }[key] || key
   );
 }
@@ -3381,15 +3024,14 @@ const CHECKS = [
   { id: 'c3-tree-count', label: '§7.3 树里的路径点数量 = 站点 config.json 主世界点数（动态读取）', requires: ['page'], run: checkTreeCount },
   { id: 'c0c-tiles', label: '扩展：瓦片底图模式（表单/渲染/层级切换/单图互切/导出保留 tiles）', requires: ['page'], run: checkTilesMode },
   { id: 'x1-undo-redo', label: '扩展：撤销 / 重做（Ctrl+Z / Ctrl+Shift+Z）', requires: ['page'], run: checkUndoRedo },
-  { id: 'c4-calibration', label: '§7.4 两点校准解算误差 < 2 方块（并落盘）', requires: ['page'], run: checkCalibration, setsFlag: 'calibrated' },
-  { id: 'c5a-new-waypoint', label: '§7.5a 新增路径点 → 画布交互 → 坐标出现在表单', requires: ['page'], run: checkNewWaypoint, setsFlag: 'waypointAdded' },
-  { id: 'c5b-save-verify', label: '§7.5b 保存 → 站点 config.json：JSON.parse + schema + 新点存在', requires: ['waypointAdded'], run: checkSaveVerify, setsFlag: 'saved' },
+  { id: 'c5a-new-waypoint', label: '§7.4a 新增路径点 → 画布交互 → 坐标出现在表单', requires: ['page'], run: checkNewWaypoint, setsFlag: 'waypointAdded' },
+  { id: 'c5b-save-verify', label: '§7.4b 保存 → 站点 config.json：JSON.parse + schema + 新点存在', requires: ['waypointAdded'], run: checkSaveVerify, setsFlag: 'saved' },
   { id: 'x2-backup', label: '扩展：保存把写前备份写到 .backups/（JSON 可解析、点数正确、根目录无散落 bak）', requires: ['saved'], run: checkBackup },
-  { id: 'c5c-place', label: '§7.5c 交互语义：新建=select →「在图上取点」→ place → 落位回 select；点空白不移动已选点', requires: ['page'], run: checkPlaceMode },
-  { id: 'c5d-drag', label: '§7.5d 拖动移动开关：默认拖不动 → 开启可拖 → Alt 临时可拖', requires: ['page'], run: checkDragMove },
-  { id: 'c6-save-blocked', label: '§7.6 存在 error 时保存被阻止并提示', requires: ['saved'], run: checkSaveBlocked },
-  { id: 'c7-preview', label: '§7.7 预览 iframe 渲染出「草稿」路径点数量', requires: ['page'], run: checkPreview },
-  { id: 'c8-path-traversal', label: '§7.8 越界写入（../evil.png 等）返回 4xx', requires: ['server'], run: checkPathTraversal },
+  { id: 'c5c-place', label: '§7.4c 交互语义：新建=select →「在图上取点」→ place → 落位回 select；点空白不移动已选点', requires: ['page'], run: checkPlaceMode },
+  { id: 'c5d-drag', label: '§7.4d 拖动移动开关：默认拖不动 → 开启可拖 → Alt 临时可拖', requires: ['page'], run: checkDragMove },
+  { id: 'c6-save-blocked', label: '§7.5 存在 error 时保存被阻止并提示', requires: ['saved'], run: checkSaveBlocked },
+  { id: 'c7-preview', label: '§7.6 预览 iframe 渲染出「草稿」路径点数量', requires: ['page'], run: checkPreview },
+  { id: 'c8-path-traversal', label: '§7.7 越界写入（../evil.png 等）返回 4xx', requires: ['server'], run: checkPathTraversal },
   { id: 'x4-real-site-untouched', label: '扩展：真实站点未被本次 e2e 写入（外部用户的改动降级为警告）', requires: [], run: checkRealSiteUntouched },
 ];
 
@@ -3418,7 +3060,6 @@ async function main() {
     siteWaypointNames: [],
     siteGroupNames: [],
     siteFirstWaypoint: null,
-    originalCalibration: null,
   };
 
   const startedAt = Date.now();
@@ -3470,12 +3111,11 @@ async function main() {
     ['§7.1', 'c1-health'],
     ['§7.2', 'c2-page'],
     ['§7.3', 'c3-tree-count'],
-    ['§7.4', 'c4-calibration'],
-    ['§7.5', 'c5a-new-waypoint'],
-    ['§7.5', 'c5b-save-verify'],
-    ['§7.6', 'c6-save-blocked'],
-    ['§7.7', 'c7-preview'],
-    ['§7.8', 'c8-path-traversal'],
+    ['§7.4', 'c5a-new-waypoint'],
+    ['§7.4', 'c5b-save-verify'],
+    ['§7.5', 'c6-save-blocked'],
+    ['§7.6', 'c7-preview'],
+    ['§7.7', 'c8-path-traversal'],
   ];
   console.log('');
   console.log('契约 §7 对照：');
@@ -3519,7 +3159,7 @@ async function main() {
 async function preflight(ctx) {
   const report = ctx.report;
 
-  // 站点仓库只读：记录原画幅与路径点基线
+  // 站点仓库只读：记录路径点基线
   const realConfigPath = path.join(OPT.siteRepo, 'config.json');
   assert(fs.existsSync(realConfigPath), `站点仓库缺少 config.json：${realConfigPath}`);
   ctx.realSiteSnapshot = await snapshotDir(OPT.siteRepo);
@@ -3533,7 +3173,6 @@ async function preflight(ctx) {
   ctx.siteWaypointNames = (over?.waypoints || []).map((w) => String(w.name || ''));
   ctx.siteGroupNames = (over?.groups || []).map((g) => String(g.name || ''));
   ctx.siteFirstWaypoint = (over?.waypoints || [])[0] ? { id: String(over.waypoints[0].id), name: String(over.waypoints[0].name) } : null;
-  ctx.originalCalibration = { ...(over?.calibration || {}) };
   ctx.siteTitle = siteConfig.site?.title;
   ctx.dimensionId = over?.id ? String(over.id) : 'overworld';
   ctx.siteImageName = over?.image ? String(over.image) : null;

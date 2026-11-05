@@ -487,7 +487,7 @@ function normalizeCalibration(raw, warnings, dimensionName, hasTiles = false) {
   const calibration = emptyCalibration();
   if (!isObject(raw)) {
     if (!hasTiles) {
-      warnings.push(`维度「${dimensionName}」没有 calibration，路径点将无法定位（请在工具里校准画幅）`);
+      warnings.push(`维度「${dimensionName}」没有 calibration，路径点将无法定位（请在 config.json 补画幅或改用瓦片底图）`);
     }
     return calibration;
   }
@@ -505,12 +505,12 @@ function normalizeCalibration(raw, warnings, dimensionName, hasTiles = false) {
     calibration.zMin = bounds[2];
     calibration.zMax = bounds[3];
     if (!(bounds[1] > bounds[0]) || !(bounds[3] > bounds[2])) {
-      warnings.push(`维度「${dimensionName}」画幅不合法（xMax 应大于 xMin、zMax 应大于 zMin），请在工具里重新校准`);
+      warnings.push(`维度「${dimensionName}」画幅不合法（xMax 应大于 xMin、zMax 应大于 zMin），请修正 config.json 中的 calibration`);
     }
     return calibration;
   }
   if (hasSomeBounds) {
-    warnings.push(`维度「${dimensionName}」画幅四边界不完整（缺的已置空），请在工具里重新校准`);
+    warnings.push(`维度「${dimensionName}」画幅四边界不完整（缺的已置空），请修正 config.json 中的 calibration`);
   }
 
   // 兼容站点支持的替代写法：pixelsPerBlock + 左上角世界坐标
@@ -1059,7 +1059,7 @@ function validateCalibration(calibration, path, dimension, imageSizeOf, error, w
           if (ratio > 1.03) {
             warn(
               path,
-              `画幅比例与图片像素比例不一致（X ${formatRatio(blocksPerPixelX)} 方块/像素，Z ${formatRatio(blocksPerPixelZ)} 方块/像素），路径点可能被拉伸；若不是有意为之请重新校准`,
+              `画幅比例与图片像素比例不一致（X ${formatRatio(blocksPerPixelX)} 方块/像素，Z ${formatRatio(blocksPerPixelZ)} 方块/像素），路径点可能被拉伸；若不是有意为之请修正 config.json 里的画幅`,
             );
           }
         }
@@ -1076,13 +1076,13 @@ function validateCalibration(calibration, path, dimension, imageSizeOf, error, w
     if (hasScale) {
       warn(path, '使用了 pixelsPerBlock + originX/originZ 的替代写法（站点支持），推荐改成四边界写法');
     } else {
-      report(path, '还没有校准画幅（需要 xMin / xMax / zMin / zMax）');
+      report(path, '画幅缺失（需要 xMin / xMax / zMin / zMax）');
     }
   }
 
   // 瓦片底图的世界范围来自 manifest，画幅只当单图兜底，不再要求「已校准」标记
   if (calibration.calibrated !== true && !hasTiles) {
-    warn(`${path}.calibrated`, '画幅还没有标记为「已校准」，确认无误后请完成一次校准');
+    warn(`${path}.calibrated`, '画幅还没有标记为「已校准」，确认无误后请把 config.json 里的 calibrated 设为 true');
   }
 }
 
