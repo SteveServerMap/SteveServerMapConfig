@@ -133,7 +133,11 @@ async function main() {
       baseMeta: document.getElementById('mg-base-meta')?.textContent || '',
       analyzeDisabled: document.getElementById('mg-analyze')?.disabled,
     }));
-    check('§2 合并页启动且默认载入站点目标图', boot.hasMerge && /px/.test(boot.baseMeta), JSON.stringify(boot));
+    check(
+      '§2 合并页启动且瓦片站点给出瓦片差分引导（不自动载入瓦片底图）',
+      boot.hasMerge && boot.baseMeta === '未载入' && boot.analyzeDisabled === true && /站点地图使用瓦片/.test(boot.status),
+      JSON.stringify(boot),
+    );
 
     await setFile('mg-base-file', path.join(FIXTURES, 'base.png'));
     const baseMeta = await page.evalFn(() => document.getElementById('mg-base-meta')?.textContent || '');

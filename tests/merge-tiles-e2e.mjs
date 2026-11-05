@@ -74,6 +74,11 @@ async function prepareSiteCopy() {
   }
   await fs.cp(path.join(SITE_REPO, 'assets'), path.join(dir, 'assets'), { recursive: true });
 
+  // 站点配置里下界/末地也是瓦片维度：真实瓦片集一并拷进副本，切换瓦片模式时 manifest 探测才不会 404
+  for (const dim of ['nether', 'the_end']) {
+    await fs.cp(path.join(SITE_REPO, 'tiles', dim), path.join(dir, 'tiles', dim), { recursive: true }).catch(() => {});
+  }
+
   // 夹具基底瓦片集：与 tile-merge 单测同一套（0_0 绿 / 2_2 蓝）
   const src = path.join(dir, '_fixture-src');
   await fs.mkdir(src, { recursive: true });
