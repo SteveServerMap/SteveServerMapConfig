@@ -25,14 +25,18 @@
       </div>
     </div>
     <div class="mg-actions">
+      <div class="mg-modes" role="tablist" aria-label="合并模式">
+        <button id="mg-mode-image" class="btn ghost small is-active" role="tab" aria-selected="true" type="button" title="两张单图对齐合并（PNG/JPEG/WEBP）">单图合并</button>
+        <button id="mg-mode-tiles" class="btn ghost small" role="tab" aria-selected="false" type="button" title="站点瓦片集 + 另一套 XAERO 导出，逐瓦片差分合并">瓦片差分</button>
+      </div>
       <span id="mg-status" class="status-chip" data-tone="info">等待载入</span>
       <button id="mg-analyze" class="btn ghost" type="button" title="按当前校准计算两张图的差异">
         <svg class="icon"><use href="#i-search"></use></svg><span>分析差异</span>
       </button>
-      <button id="mg-apply" class="btn ghost" type="button" disabled title="按策略合成一张新的地图">
+      <button id="mg-apply" class="btn ghost mg-image-only" type="button" disabled title="按策略合成一张新的地图">
         <svg class="icon"><use href="#i-layers"></use></svg><span>按策略合并</span>
       </button>
-      <button id="mg-download" class="btn ghost" type="button" disabled title="下载合并后的 PNG">
+      <button id="mg-download" class="btn ghost mg-image-only" type="button" disabled title="下载合并后的 PNG">
         <svg class="icon"><use href="#i-download"></use></svg><span>下载 PNG</span>
       </button>
       <button id="mg-save" class="btn primary" type="button" disabled title="写回站点目录（写前自动备份）">
@@ -45,7 +49,7 @@
   <main class="mg-body">
 
     <!-- 左：目标图 -->
-    <section class="mg-panel mg-left" aria-label="目标图（当前站点地图）">
+    <section id="mg-image-base-panel" class="mg-panel mg-left mg-image-only" aria-label="目标图（当前站点地图）">
       <div class="mg-panel-head">
         <h2 class="mg-panel-title">目标图 · 当前站点地图</h2>
         <span id="mg-base-meta" class="mg-meta">未载入</span>
@@ -95,7 +99,7 @@
     </section>
 
     <!-- 中：结果预览 -->
-    <section class="mg-center" aria-label="合并结果预览">
+    <section id="mg-image-center" class="mg-center mg-image-only" aria-label="合并结果预览">
       <div class="mg-panel-head">
         <h2 class="mg-panel-title">合并预览</h2>
         <div id="mg-legend" class="mg-legend">
@@ -126,7 +130,7 @@
     </section>
 
     <!-- 右：新图 -->
-    <section class="mg-panel mg-right" aria-label="新图（别人给的地图）">
+    <section id="mg-image-incoming-panel" class="mg-panel mg-right mg-image-only" aria-label="新图（别人给的地图）">
       <div class="mg-panel-head">
         <h2 class="mg-panel-title">新图 · 从别人那里下载的</h2>
         <span id="mg-inc-meta" class="mg-meta">未载入</span>
@@ -174,23 +178,86 @@
         <span class="mg-origin-hint">可直接输入数字精确设置，或用方向键微调</span>
       </div>
     </section>
+
+    <!-- 瓦片差分模式：左 = 目标瓦片集（站点） -->
+    <section id="mg-tiles-base-panel" class="mg-panel mg-left mg-tiles-only" aria-label="目标瓦片集（站点）" hidden>
+      <div class="mg-panel-head">
+        <h2 class="mg-panel-title">目标瓦片集 · 站点</h2>
+        <span id="mg-tiles-base-meta" class="mg-meta">未选择维度</span>
+      </div>
+      <div class="mg-controls mg-tiles-toolbar">
+        <label class="mg-field">
+          <span>维度</span>
+          <select id="mg-tiles-dim" class="mg-select" aria-label="选择站点瓦片维度"></select>
+        </label>
+        <button id="mg-tiles-reload" class="btn ghost small" type="button" title="重新读取站点维度列表">刷新</button>
+      </div>
+      <div id="mg-tiles-base-info" class="mg-tiles-info">选择维度后显示瓦片集摘要。</div>
+    </section>
+
+    <!-- 瓦片差分模式：中 = 差异预览 -->
+    <section id="mg-tiles-center" class="mg-center mg-tiles-only" aria-label="瓦片差异预览" hidden>
+      <div class="mg-panel-head">
+        <h2 class="mg-panel-title">瓦片差异预览</h2>
+        <div class="mg-legend">
+          <span class="mg-legend-item"><i class="mg-dot mg-dot-new"></i>新增</span>
+          <span class="mg-legend-item"><i class="mg-dot mg-dot-changed"></i>变更</span>
+          <span class="mg-legend-item"><i class="mg-dot mg-dot-onlybase"></i>仅目标图</span>
+        </div>
+      </div>
+      <div class="mg-canvas-wrap mg-center-wrap">
+        <canvas id="mg-tiles-canvas" class="mg-canvas" width="512" height="512"></canvas>
+        <div id="mg-tiles-hint" class="mg-canvas-hint">点「分析差异」后这里显示每张 level-0 瓦片的分类色块</div>
+      </div>
+      <div id="mg-tiles-stats" class="mg-stats">
+        <div class="mg-stat"><b>—</b><span>新增瓦片</span></div>
+        <div class="mg-stat"><b>—</b><span>变更瓦片</span></div>
+        <div class="mg-stat"><b>—</b><span>仅目标图</span></div>
+        <div class="mg-stat"><b>—</b><span>新增面积</span></div>
+      </div>
+    </section>
+
+    <!-- 瓦片差分模式：右 = 新图瓦片源（XAERO 导出） -->
+    <section id="mg-tiles-incoming-panel" class="mg-panel mg-right mg-tiles-only" aria-label="新图瓦片源（XAERO 导出）" hidden>
+      <div class="mg-panel-head">
+        <h2 class="mg-panel-title">新图瓦片源 · XAERO 导出</h2>
+        <div class="mg-panel-actions">
+          <span id="mg-tiles-inc-meta" class="mg-meta">未选择文件</span>
+          <button id="mg-tiles-clear" class="btn ghost small" type="button" title="清空已选文件">清空</button>
+        </div>
+      </div>
+      <div id="mg-tiles-drop" class="mg-drop" role="button" tabindex="0" title="点击选择文件，或把文件拖到这里（可多选）">
+        <svg class="icon"><use href="#i-image"></use></svg>
+        <span>点击选择 / 拖入 XAERO 导出 PNG（x&lt;X&gt;_z&lt;Z&gt;）或区域 zip，可多选</span>
+      </div>
+      <input id="mg-tiles-file" type="file" accept=".png,.zip,image/png,application/zip" multiple hidden>
+      <ul id="mg-tiles-files" class="mg-tiles-files"></ul>
+      <p class="mg-tiles-note">
+        世界坐标取自文件名，无需拾取原点。合并只动新图覆盖到的区域：新增/变更按下方选项补入，
+        新图没覆盖到的旧区域原样保留。
+      </p>
+    </section>
   </main>
 
   <!-- ============================ 页脚：阈值与策略 ============================ -->
   <footer class="mg-footer">
     <div class="mg-footer-group">
-      <label class="mg-field"><span>tile 像素</span><input id="mg-tile-size" type="number" min="4" step="4" value="16"></label>
+      <label class="mg-field mg-image-only"><span>tile 像素</span><input id="mg-tile-size" type="number" min="4" step="4" value="16"></label>
       <label class="mg-field"><span>空白亮度阈值</span><input id="mg-void-lum" type="number" min="0" max="64" step="1" value="8"></label>
       <label class="mg-field"><span>变更色差阈值</span><input id="mg-diff-thr" type="number" min="1" max="128" step="1" value="24"></label>
     </div>
     <div class="mg-footer-group">
       <label class="mg-check"><input id="mg-opt-fill" type="checkbox" checked> 用新图补齐空白</label>
       <label class="mg-check"><input id="mg-opt-update" type="checkbox" checked> 用新图覆盖变更区域</label>
-      <label class="mg-field"><span>保存为</span><input id="mg-save-name" type="text" placeholder="主世界.png"></label>
+      <label class="mg-field mg-image-only"><span>保存为</span><input id="mg-save-name" type="text" placeholder="主世界.png"></label>
     </div>
-    <p class="mg-note">
+    <p class="mg-note mg-image-only" id="mg-note-image">
       提示：「变更」是按像素色差判断的启发式结果。若两张图的渲染调色板/光照不同，会大面积判为变更 ——
       请先看中间预览的色块，再决定是否覆盖。保存前会自动备份到站点仓库的 <code>.backups/</code>。
+    </p>
+    <p class="mg-note mg-tiles-only" id="mg-note-tiles" hidden>
+      提示：「变更」按每张 level-0 瓦片的平均色差判定，同属启发式。保存会用合并结果整体替换站点
+      <code>tiles/维度/</code>（替换前自动备份到 <code>.backups/</code>，失败自动回滚）。
     </p>
   </footer>
 </div>

@@ -1,14 +1,18 @@
 /**
  * merge.js —— 地图合并页面的控制器
  *
- * 流程：
- *   1. 载入站点 config.json，把「第一个单图维度的地图」作为目标图（也可自己选文件）；
- *   2. 在新图上点一下世界 (0,0) + 填「每方块像素数」→ 得到它的校准；
- *   3. 「分析差异」= 把新图重采样到目标图网格 → 按 tile 分类 → 画叠加层 + 统计；
- *   4. 「按策略合并」= 按当前勾选合成 → 中间预览；
- *   5. 「下载 PNG」/「保存到站点」（写前自动备份到 .backups/）。
- *
- * 所有图像运算都在浏览器里完成；写盘只用已有的 /api/import-image。
+ * 两种模式：
+ *   单图合并（默认）：
+ *     1. 载入站点 config.json，把「第一个单图维度的地图」作为目标图（也可自己选文件）；
+ *     2. 在新图上点一下世界 (0,0) + 填「每方块像素数」→ 得到它的校准；
+ *     3. 「分析差异」= 把新图重采样到目标图网格 → 按 tile 分类 → 画叠加层 + 统计；
+ *     4. 「按策略合并」= 按当前勾选合成 → 中间预览；
+ *     5. 「下载 PNG」/「保存到站点」（写前自动备份到 .backups/）。
+ *     所有图像运算都在浏览器里完成；写盘只用已有的 /api/import-image。
+ *   瓦片差分：
+ *     1. 选择站点瓦片维度 + 拖入另一套 Xaero 导出（x<X>_z<Z>.png / 区域 zip）；
+ *     2. 「分析差异」= 上传文件，服务端逐瓦片差分并把合并结果暂存；
+ *     3. 「保存到站点」= 整体替换 tiles/<维度>/（写前自动备份，失败自动回滚）。
  */
 
 import { MergeUI } from './merge-ui.js';
@@ -36,6 +40,15 @@ const state = {
   analysis: null,
   merged: null,        // { data, width, height }
   analysisStale: false,
+  mode: 'image',       // 'image' | 'tiles'
+  tiles: {
+    dims: [],          // [{ id, name, manifestPath, manifest, error }]
+    dim: null,
+    files: [],         // 新图文件（File 对象）
+    analysis: null,    // /api/merge-tiles/analyze 的响应
+    staged: false,     // 服务端有该维度的暂存合并结果
+    stale: false,      // 分析后参数/文件又变了，保存需重新分析
+  },
 };
 
 /* ============================== 启动 ============================== */
@@ -52,11 +65,22 @@ async function bootstrap() {
     onPickIncoming: (point) => handlePick('incoming', point),
     onBaseImage: (file) => loadBaseFromFile(file),
     onIncomingImage: (file) => loadIncomingFromFile(file),
-    onParamsChange: () => markAnalysisStale('分析参数已改，请重新点「分析差异」'),
-    onOptionChange: () => recomposeIfPossible(),
+    onParamsChange: () => {
+      if (state.mode === 'tiles') markTilesStale();
+      else markAnalysisStale('分析参数已改，请重新点「分析差异」');
+    },
+    onOptionChange: () => {
+      if (state.mode === 'tiles') markTilesStale();
+      else recomposeIfPossible();
+    },
     onAction: handleAction,
     onOriginChange: (which, point) => handleOriginChange(which, point),
     onPpbChange: (which, ppb) => handlePpbChange(which, ppb),
+    onModeChange: (mode) => switchMode(mode),
+    onTileDimChange: (id) => selectTileDim(id),
+    onTileFiles: (files) => setTileFiles(files),
+    onTileClear: () => setTileFiles([]),
+    onTileReload: () => loadTileDims(),
   });
 
   bindKeyboard();
@@ -117,7 +141,7 @@ async function loadDefaultBase() {
   const dim = dimensions.find((d) => d?.image && !hasTiles(d) && !tiledFallback(config, d.image));
   if (!dim) {
     state.ui.setStatus(usesTiles
-      ? '站点地图使用瓦片，不能通过合并回退 PNG 更新地图。请返回主编辑器重新生成瓦片；也可手动选择独立图片合并并下载。'
+      ? '站点地图使用瓦片：可切到「瓦片差分」模式合并瓦片，或返回主编辑器重新生成瓦片；也可手动选择独立图片合并并下载。'
       : '站点没有可用的地图，请手动选择目标图', 'warn');
     return;
   }
@@ -291,13 +315,13 @@ function markAnalysisStale(message) {
 async function handleAction(name) {
   switch (name) {
     case 'analyze':
-      return runAnalyze();
+      return state.mode === 'tiles' ? runAnalyzeTiles() : runAnalyze();
     case 'apply':
-      return runCompose();
+      return state.mode === 'tiles' ? undefined : runCompose();
     case 'download':
-      return downloadMerged();
+      return state.mode === 'tiles' ? undefined : downloadMerged();
     case 'save':
-      return saveToSite();
+      return state.mode === 'tiles' ? saveTilesToSite() : saveToSite();
     case 'back':
       window.location.href = '/';
       return undefined;
@@ -499,6 +523,201 @@ async function reloadBaseImage(fileName) {
   }
 }
 
+/* ============================== 瓦片差分模式 ============================== */
+
+async function switchMode(mode) {
+  state.mode = mode === 'tiles' ? 'tiles' : 'image';
+  state.ui.setMode(state.mode);
+  if (state.mode === 'tiles') {
+    if (!state.tiles.dims.length) await loadTileDims();
+    state.ui.setStatus(
+      state.tiles.dims.length
+        ? '瓦片差分：选择站点维度并拖入新图文件，然后点「分析差异」'
+        : '站点没有任何瓦片维度，请先在主编辑器里用 Xaero 导出生成瓦片',
+      state.tiles.dims.length ? 'info' : 'warn',
+    );
+  } else {
+    state.ui.setStatus('单图合并模式', 'info');
+  }
+}
+
+/** 读取站点配置里的瓦片维度 + 各自的 manifest 摘要 */
+async function loadTileDims() {
+  let config = null;
+  try {
+    const res = await api('/api/site-config');
+    config = res.ok ? res.config : null;
+  } catch (err) {
+    console.warn('[merge] 读取站点配置失败：', err);
+    state.ui.setStatus(`读取站点配置失败：${err.message}`, 'error');
+    return state.tiles.dims;
+  }
+  const dims = [];
+  for (const dim of config?.dimensions || []) {
+    if (!hasTiles(dim)) continue;
+    const manifestPath = typeof dim.tiles === 'string'
+      ? dim.tiles
+      : (dim.tiles?.manifest || `tiles/${dim.id}/manifest.json`);
+    let manifest = null;
+    let error = '';
+    try {
+      const res = await fetch(`/preview/${encodeURIComponent(manifestPath)}?t=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      manifest = await res.json();
+    } catch (err) {
+      error = err.message;
+    }
+    dims.push({ id: dim.id, name: dim.name || dim.id, manifestPath, manifest, error });
+  }
+  state.tiles.dims = dims;
+  const keep = state.tiles.dim && dims.some((d) => d.id === state.tiles.dim);
+  state.ui.setTileDims(dims.map((d) => ({ id: d.id, name: d.name })), keep ? state.tiles.dim : null);
+  await selectTileDim(state.ui.getTileDim());
+  if (!dims.length && state.mode === 'tiles') {
+    state.ui.setStatus('站点没有任何瓦片维度：请先在主编辑器里用 Xaero 导出生成瓦片', 'warn');
+  }
+  return dims;
+}
+
+async function selectTileDim(id) {
+  state.tiles.dim = id || null;
+  const dim = state.tiles.dims.find((d) => d.id === id);
+  invalidateTiles();
+  state.ui.setTileState({ dim: id || null, dimReady: false, staged: false, stale: false });
+  if (!dim) {
+    state.ui.setTileBaseInfo({ error: '未选择维度' });
+    if (state.mode === 'tiles') state.ui.setStatus('请选择站点瓦片维度', 'warn');
+    return;
+  }
+  if (dim.error) {
+    state.ui.setTileBaseInfo({ error: `读取瓦片 manifest 失败：${dim.error}（该维度的瓦片可能还没生成）` });
+    if (state.mode === 'tiles') state.ui.setStatus(`维度「${dim.name}」的瓦片 manifest 读取失败：${dim.error}`, 'warn');
+    return;
+  }
+  const m = dim.manifest;
+  state.ui.setTileBaseInfo({
+    manifest: m,
+    label: dim.name,
+    tileSize: m.tileSize,
+    bounds: m.worldBlockRange,
+    levels: m.levels?.length,
+    tilesWritten: m.stats?.tilesWritten,
+    generatedAt: m.generatedAt,
+  });
+  state.ui.setTileState({ dim: id, dimReady: true });
+  if (state.mode === 'tiles') {
+    state.ui.setStatus(`目标瓦片集「${dim.name}」已就绪（${m.stats?.tilesWritten ?? 0} 张瓦片）`, 'ok');
+  }
+}
+
+function setTileFiles(files) {
+  const list = [...(files || [])];
+  state.tiles.files = list;
+  invalidateTiles();
+  state.ui.setTileFiles(list);
+  state.ui.setTileState({ files: list.length, staged: false, stale: false });
+  if (state.mode === 'tiles') {
+    state.ui.setStatus(list.length ? `已选 ${list.length} 个新图文件，点「分析差异」开始逐瓦片对比` : '已清空新图文件', 'info');
+  }
+}
+
+/** 瓦片模式的分析/暂存结果作废 */
+function invalidateTiles() {
+  state.tiles.analysis = null;
+  state.tiles.staged = false;
+  state.tiles.stale = false;
+  state.ui.setTileAnalysis(null);
+}
+
+/** 分析之后改了参数/选项：暂存结果还在，但保存前必须重新分析 */
+function markTilesStale() {
+  if (!state.tiles.analysis) return;
+  state.tiles.stale = true;
+  state.ui.setTileState({ stale: true });
+  state.ui.setStatus('参数已改，请重新点「分析差异」后再保存', 'warn');
+}
+
+async function runAnalyzeTiles() {
+  const dim = state.ui.getTileDim();
+  if (!dim) {
+    state.ui.setStatus('先选择目标瓦片维度', 'warn');
+    return;
+  }
+  const dimInfo = state.tiles.dims.find((d) => d.id === dim);
+  if (!dimInfo || dimInfo.error) {
+    state.ui.setStatus('该维度的瓦片不可用，请先在主编辑器生成瓦片', 'warn');
+    return;
+  }
+  if (!state.tiles.files.length) {
+    state.ui.setStatus('先拖入新图文件（XAERO 导出 PNG / 区域 zip）', 'warn');
+    return;
+  }
+  invalidateTiles();
+  state.ui.setBusy(true);
+  try {
+    const params = state.ui.getParams();
+    const options = state.ui.getOptions();
+    const fd = new FormData();
+    fd.append('dim', dim);
+    fd.append('fillNew', options.fillNew ? '1' : '0');
+    fd.append('updateChanged', options.updateChanged ? '1' : '0');
+    fd.append('voidLuminance', String(params.voidLuminance));
+    fd.append('diffThreshold', String(params.diffThreshold));
+    for (const file of state.tiles.files) fd.append('files', file, file.name);
+    const res = await apiUpload('/api/merge-tiles/analyze', fd);
+    state.tiles.analysis = res;
+    state.tiles.staged = true;
+    state.tiles.stale = false;
+    state.ui.setTileAnalysis({ counts: res.counts, blocksArea: res.blocksArea, grid: res.grid });
+    state.ui.setTileState({ staged: true, stale: false });
+    state.ui.setStatus(
+      `分析完成：新增 ${res.counts.onlyIncoming} 瓦片 · 变更 ${res.counts.changed} 瓦片 · 仅目标图 ${res.counts.onlyBase} 瓦片（耗时 ${(res.durationMs / 1000).toFixed(1)}s）`,
+      'ok',
+    );
+  } catch (err) {
+    console.error('[merge] 瓦片分析失败：', err);
+    state.ui.setStatus(`分析失败：${err.message}`, 'error');
+    state.ui.toast(`分析失败：${err.message}`, 'error', 5000);
+  } finally {
+    state.ui.setBusy(false);
+  }
+}
+
+async function saveTilesToSite() {
+  const { tiles } = state;
+  if (!tiles.staged || !tiles.analysis) {
+    state.ui.setStatus('请先点「分析差异」再保存', 'warn');
+    return;
+  }
+  if (tiles.stale) {
+    state.ui.setStatus('参数已改，请重新点「分析差异」后再保存', 'warn');
+    return;
+  }
+  const dim = state.ui.getTileDim();
+  if (!dim) {
+    state.ui.setStatus('先选择目标瓦片维度', 'warn');
+    return;
+  }
+  state.ui.setBusy(true);
+  try {
+    const res = await api('/api/merge-tiles/apply', { method: 'POST', body: { dim } });
+    const msg = `已发布到 tiles/${res.dim}/（${res.tilesWritten} 张瓦片，${res.levels} 层）` +
+      `${res.backup ? `，原瓦片备份为 ${res.backup}/` : ''}`;
+    invalidateTiles();
+    state.ui.setTileState({ staged: false, stale: false });
+    // 基底已换，重新读 manifest 摘要
+    await loadTileDims();
+    state.ui.setStatus(msg, 'ok');
+    state.ui.toast('瓦片差分合并已保存到站点', 'ok', 3600);
+  } catch (err) {
+    console.error('[merge] 瓦片保存失败：', err);
+    state.ui.setStatus(`保存失败：${err.message}`, 'error');
+    state.ui.toast(`保存失败：${err.message}`, 'error', 5000);
+  } finally {
+    state.ui.setBusy(false);
+  }
+}
+
 /* ============================== 工具函数 ============================== */
 
 function nextFrame() {
@@ -562,9 +781,28 @@ async function api(path, { method = 'GET', body } = {}) {
   return data;
 }
 
+/** multipart 上传版 api()：body 用 FormData，不手动设 Content-Type（让浏览器带 boundary） */
+async function apiUpload(path, formData) {
+  const res = await fetch(path, { method: 'POST', body: formData, cache: 'no-store' });
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`POST ${path} 返回了非 JSON（HTTP ${res.status}）：${text.slice(0, 120)}`);
+  }
+  if (!res.ok || (data && data.ok === false)) {
+    throw new Error((data && data.error) || `POST ${path} 失败（HTTP ${res.status}）`);
+  }
+  return data;
+}
+
 /* 调试接口（自动化测试用） */
 window.__merge = {
   state,
+  get mode() {
+    return state.mode;
+  },
   get base() {
     return state.base;
   },
@@ -585,6 +823,18 @@ window.__merge = {
   download: () => downloadMerged(),
   save: () => saveToSite(),
   action: (name) => handleAction(name),
+  switchMode: (mode) => switchMode(mode),
+  tileDims: () => state.tiles.dims.map((d) => ({ id: d.id, name: d.name, ok: !d.error })),
+  tiles: () => ({
+    dim: state.tiles.dim,
+    files: state.tiles.files.map((f) => f.name),
+    staged: state.tiles.staged,
+    stale: state.tiles.stale,
+    analysis: state.tiles.analysis
+      ? { counts: state.tiles.analysis.counts, blocksArea: state.tiles.analysis.blocksArea }
+      : null,
+  }),
+  setTileFiles: (files) => setTileFiles(files),
   setParams: (params) => {
     state.ui.setParams(params);
     markAnalysisStale('参数已改');

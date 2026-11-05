@@ -355,11 +355,17 @@ export class MergeUI {
     onAction = null,
     onOriginChange = null,
     onPpbChange = null,
+    onModeChange = null,
+    onTileDimChange = null,
+    onTileFiles = null,
+    onTileClear = null,
+    onTileReload = null,
   } = {}) {
     this.root = rootEl || document;
     this.callbacks = {
       onPickBase, onPickIncoming, onBaseImage, onIncomingImage,
       onParamsChange, onOptionChange, onAction, onOriginChange, onPpbChange,
+      onModeChange, onTileDimChange, onTileFiles, onTileClear, onTileReload,
     };
 
     this.pickMode = null;
@@ -368,6 +374,9 @@ export class MergeUI {
     this.busy = false;
     this.baseCal = null;
     this.incomingCal = null;
+    this.mode = 'image';
+    this.tile = { dim: null, dimReady: false, files: 0, staged: false, stale: false };
+    this.tileAnalysis = null;
 
     this.baseView = new CanvasView($('mg-base-canvas'), {
       onPick: (point) => this._handleCanvasPick('base', point),
@@ -454,6 +463,48 @@ export class MergeUI {
     }
     for (const id of ['mg-opt-fill', 'mg-opt-update']) {
       $(id)?.addEventListener('change', () => this.callbacks.onOptionChange?.(this.getOptions()));
+    }
+
+    // ---- 瓦片差分模式 ----
+    $('mg-mode-image')?.addEventListener('click', () => {
+      if (this.busy) return;
+      this.callbacks.onModeChange?.('image');
+    });
+    $('mg-mode-tiles')?.addEventListener('click', () => {
+      if (this.busy) return;
+      this.callbacks.onModeChange?.('tiles');
+    });
+    $('mg-tiles-dim')?.addEventListener('change', () => this.callbacks.onTileDimChange?.($('mg-tiles-dim')?.value));
+    $('mg-tiles-reload')?.addEventListener('click', () => this.callbacks.onTileReload?.());
+    $('mg-tiles-clear')?.addEventListener('click', () => this.callbacks.onTileClear?.());
+
+    const tilesDrop = $('mg-tiles-drop');
+    const tilesInput = $('mg-tiles-file');
+    if (tilesDrop && tilesInput) {
+      tilesDrop.addEventListener('click', () => tilesInput.click());
+      tilesDrop.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          tilesInput.click();
+        }
+      });
+      tilesDrop.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        tilesDrop.classList.add('is-over');
+      });
+      tilesDrop.addEventListener('dragleave', () => tilesDrop.classList.remove('is-over'));
+      tilesDrop.addEventListener('drop', (event) => {
+        event.preventDefault();
+        tilesDrop.classList.remove('is-over');
+        const files = [...(event.dataTransfer?.files || [])];
+        if (!files.length) return;
+        this.callbacks.onTileFiles?.(files);
+      });
+      tilesInput.addEventListener('change', (event) => {
+        const files = [...(event.target.files || [])];
+        event.target.value = '';
+        if (files.length) this.callbacks.onTileFiles?.(files);
+      });
     }
   }
 
@@ -743,12 +794,185 @@ export class MergeUI {
   }
 
   _syncButtons() {
+    if (this.mode === 'tiles') {
+      const ready = !!this.tile.dimReady && this.tile.files > 0;
+      if ($('mg-analyze')) $('mg-analyze').disabled = this.busy || !ready;
+      if ($('mg-save')) $('mg-save').disabled = this.busy || !this.tile.staged || this.tile.stale;
+      return;
+    }
     const hasAnalysis = !!this.analysis;
     const hasMerged = !!this.merged;
     if ($('mg-apply')) $('mg-apply').disabled = this.busy || !hasAnalysis;
     if ($('mg-download')) $('mg-download').disabled = this.busy || !hasMerged;
     if ($('mg-save')) $('mg-save').disabled = this.busy || !hasMerged;
     if ($('mg-analyze')) $('mg-analyze').disabled = this.busy || !(this.baseView.image && this.incomingView.image);
+  }
+
+  /* ------------------------------ 瓦片差分模式 ------------------------------ */
+
+  setMode(mode) {
+    this.mode = mode === 'tiles' ? 'tiles' : 'image';
+    for (const el of document.querySelectorAll('.mg-image-only')) el.hidden = this.mode !== 'image';
+    for (const el of document.querySelectorAll('.mg-tiles-only')) el.hidden = this.mode !== 'tiles';
+    const imBtn = $('mg-mode-image');
+    const tiBtn = $('mg-mode-tiles');
+    imBtn?.classList.toggle('is-active', this.mode === 'image');
+    tiBtn?.classList.toggle('is-active', this.mode === 'tiles');
+    imBtn?.setAttribute('aria-selected', String(this.mode === 'image'));
+    tiBtn?.setAttribute('aria-selected', String(this.mode === 'tiles'));
+    const analyze = $('mg-analyze');
+    const save = $('mg-save');
+    if (this.mode === 'tiles') {
+      if (analyze) analyze.title = '上传新图文件，与站点瓦片集逐瓦片对比';
+      if (save) save.title = '把合并结果发布到站点 tiles/维度 目录（写前自动备份，失败自动回滚）';
+    } else {
+      if (analyze) analyze.title = '按当前校准计算两张图的差异';
+      if (save) save.title = '写回站点目录（写前自动备份）';
+    }
+    this._syncButtons();
+  }
+
+  /** 填维度下拉框；selectedId 不传则默认第一个 */
+  setTileDims(dims, selectedId = null) {
+    const sel = $('mg-tiles-dim');
+    if (!sel) return;
+    sel.textContent = '';
+    for (const dim of dims) {
+      const opt = document.createElement('option');
+      opt.value = dim.id;
+      opt.textContent = dim.name || dim.id;
+      sel.appendChild(opt);
+    }
+    if (selectedId && dims.some((d) => d.id === selectedId)) sel.value = selectedId;
+    else if (dims.length) sel.value = dims[0].id;
+  }
+
+  getTileDim() {
+    return $('mg-tiles-dim')?.value || null;
+  }
+
+  setTileBaseInfo(info = {}) {
+    const el = $('mg-tiles-base-info');
+    if (!el) return;
+    const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const lines = [];
+    if (info.error) {
+      lines.push(`<span class="is-warn">${esc(info.error)}</span>`);
+    } else if (!info.manifest) {
+      lines.push('未读取到瓦片摘要');
+    } else {
+      const b = info.bounds || {};
+      lines.push(`维度 <b>${esc(info.label)}</b> · 瓦片 ${esc(info.tileSize)}×${esc(info.tileSize)} px`);
+      lines.push(`世界范围 X ${esc(b.xMin)} → ${esc(b.xMax)} · Z ${esc(b.zMin)} → ${esc(b.zMax)}`);
+      lines.push(`跨度 ${esc((b.xMax ?? 0) - (b.xMin ?? 0))}×${esc((b.zMax ?? 0) - (b.zMin ?? 0))} 方块 · 层级 ${esc(info.levels)} · 瓦片 ${esc(info.tilesWritten)} 张`);
+      if (info.generatedAt) lines.push(`生成于 ${esc(new Date(info.generatedAt).toLocaleString('zh-CN'))}`);
+    }
+    el.innerHTML = lines.join('<br>');
+  }
+
+  setTileFiles(files = []) {
+    const list = $('mg-tiles-files');
+    const meta = $('mg-tiles-inc-meta');
+    if (list) list.textContent = '';
+    for (const file of files) {
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.className = 'mg-file-name';
+      name.textContent = file.name;
+      const m = /x(-?\d+)_z(-?\d+)\.png$/i.exec(file.name);
+      const coord = document.createElement('span');
+      if (m) {
+        coord.className = 'mg-file-coord';
+        coord.textContent = `x=${m[1]} z=${m[2]}`;
+      } else if (/^[^/\\]+\.zip$/i.test(file.name)) {
+        coord.className = 'mg-file-coord';
+        coord.textContent = '区域 zip';
+      } else {
+        coord.className = 'mg-file-coord is-invalid';
+        coord.textContent = '文件名不带坐标';
+      }
+      const size = document.createElement('span');
+      size.className = 'mg-file-size';
+      size.textContent = `${Math.max(1, Math.round(file.size / 1024))} KB`;
+      li.append(name, coord, size);
+      list?.appendChild(li);
+    }
+    if (meta) meta.textContent = files.length ? `${files.length} 个文件` : '未选择文件';
+  }
+
+  setTileAnalysis(payload = null) {
+    this.tileAnalysis = payload || null;
+    const cells = $('mg-tiles-stats')?.querySelectorAll('.mg-stat') || [];
+    const setCell = (i, v) => {
+      const b = cells[i]?.querySelector('b');
+      if (b) b.textContent = String(v);
+    };
+    if (payload) {
+      const area = Math.round((payload.blocksArea?.onlyIncoming || 0) + (payload.blocksArea?.changed || 0));
+      setCell(0, payload.counts.onlyIncoming);
+      setCell(1, payload.counts.changed);
+      setCell(2, payload.counts.onlyBase);
+      setCell(3, area.toLocaleString('zh-CN'));
+      this._drawTileGrid(payload.grid);
+    } else {
+      for (let i = 0; i < 4; i += 1) setCell(i, '—');
+      this._drawTileGrid(null);
+    }
+    const hint = $('mg-tiles-hint');
+    if (hint) hint.hidden = !!payload;
+    this._syncButtons();
+  }
+
+  /** 每张 level-0 瓦片一格色块；网格太大时按块聚合取主导分类 */
+  _drawTileGrid(grid) {
+    const canvas = $('mg-tiles-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!grid || !grid.map?.length) {
+      canvas.width = 1;
+      canvas.height = 1;
+      ctx.clearRect(0, 0, 1, 1);
+      return;
+    }
+    const { cols, rows, map } = grid;
+    const stride = Math.max(1, Math.ceil(Math.max(cols, rows) / 4096));
+    const w = Math.ceil(cols / stride);
+    const h = Math.ceil(rows / stride);
+    const data = ctx.createImageData(w, h);
+    // 0 void 透明 · 1 onlyBase 灰 · 2 onlyIncoming 绿 · 3 changed 琥珀 · 4 same 透明
+    const colors = [[0, 0, 0, 0], [140, 160, 150, 140], [90, 210, 111, 215], [255, 188, 75, 215], [0, 0, 0, 0]];
+    for (let oy = 0; oy < h; oy += 1) {
+      const y0 = oy * stride;
+      const y1 = Math.min(rows, y0 + stride);
+      for (let ox = 0; ox < w; ox += 1) {
+        const x0 = ox * stride;
+        const x1 = Math.min(cols, x0 + stride);
+        const votes = [0, 0, 0, 0, 0];
+        for (let y = y0; y < y1; y += 1) {
+          for (let x = x0; x < x1; x += 1) {
+            votes[map[y * cols + x]] += 1;
+          }
+        }
+        let best = 0;
+        for (let c = 1; c < 5; c += 1) {
+          if (votes[c] > votes[best]) best = c;
+        }
+        const [r, g, b, a] = colors[best];
+        const di = (oy * w + ox) * 4;
+        data.data[di] = r;
+        data.data[di + 1] = g;
+        data.data[di + 2] = b;
+        data.data[di + 3] = a;
+      }
+    }
+    canvas.width = w;
+    canvas.height = h;
+    ctx.putImageData(data, 0, 0);
+  }
+
+  setTileState(patch = {}) {
+    Object.assign(this.tile, patch);
+    this._syncButtons();
   }
 
   cancelPick() {

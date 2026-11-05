@@ -488,3 +488,131 @@
   outline: 2px solid var(--accent, #5ad26f);
   outline-offset: -2px;
 }
+
+/* ==========================================================================
+   瓦片差分模式
+   ========================================================================== */
+
+/* 面板是 flex/按钮是 inline-flex 等带 display 的样式，会压过 UA 的 [hidden] 规则 */
+.mg-page [hidden] {
+  display: none !important;
+}
+
+.mg-modes {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid var(--border, #2b352c);
+  background: rgba(13, 18, 14, 0.75);
+}
+
+.mg-modes .btn {
+  border: 0;
+  background: transparent;
+}
+
+.mg-modes .btn.is-active {
+  color: var(--accent, #5ad26f);
+  background: rgba(90, 210, 111, 0.12);
+}
+
+.mg-select {
+  max-width: 200px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #2b352c);
+  background: #0d120e;
+  color: var(--text, #e8efe8);
+  font: inherit;
+  font-size: 12px;
+}
+
+.mg-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mg-tiles-toolbar {
+  padding-top: 12px;
+}
+
+.mg-tiles-info {
+  margin: 0 12px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #2b352c);
+  border-radius: 10px;
+  background: rgba(13, 18, 14, 0.75);
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--muted, #93a394);
+  font-variant-numeric: tabular-nums;
+}
+
+.mg-tiles-info b {
+  color: var(--text, #e8efe8);
+  font-weight: 600;
+}
+
+.mg-tiles-info .is-warn {
+  color: #ffbc4b;
+}
+
+.mg-tiles-files {
+  list-style: none;
+  margin: 10px 12px 0;
+  padding: 0;
+  flex: 1;
+  min-height: 60px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mg-tiles-files li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #2b352c);
+  background: rgba(13, 18, 14, 0.75);
+  font-size: 12px;
+}
+
+.mg-tiles-files .mg-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mg-tiles-files .mg-file-coord {
+  color: var(--accent, #5ad26f);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mg-tiles-files .mg-file-size {
+  color: var(--muted, #93a394);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mg-tiles-files .is-invalid {
+  color: #ff8f7a;
+}
+
+.mg-tiles-note {
+  margin: 10px 12px 12px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted, #93a394);
+}
+
+/* 差异色块预览：一格一瓦片，拉伸时保持锐利 */
+#mg-tiles-canvas {
+  image-rendering: pixelated;
+}

@@ -25,6 +25,7 @@ import os from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { generateXaeroTiles, inspectXaeroSource } from './tools/xaero-tiles.mjs';
+import { mergeTileSets } from './tools/tile-merge.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOOL_DIR = __dirname;
@@ -87,6 +88,7 @@ const MIME = new Map(Object.entries({
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const MAX_BODY = 64 * 1024 * 1024; // 64 MB：足够装下 3~4 MB 的 PNG（base64 后约 5 MB）
+const MERGE_UPLOAD_LIMIT = 256 * 1024 * 1024; // 瓦片差分上传多张 Xaero 导出，上限放宽
 const PREVIEW_TOKEN_TTL = 10 * 60 * 1000;
 
 /** 预览 token → { config, expires } */
@@ -205,6 +207,45 @@ async function readJsonBody(req) {
   } catch (err) {
     throw new HttpError(400, `请求体不是合法 JSON：${err.message}`);
   }
+}
+
+/**
+ * 极简 multipart/form-data 解析（零依赖）。头按 latin1 解析：浏览器对非 ASCII 文件名
+ * 会直接塞 UTF-8 字节，但本接口只接受 ASCII 的 x<X>_z<Z>.png / <rx>_<rz>.zip 文件名。
+ * @returns {Array<{name:string, filename:string|null, contentType:string, data:Buffer}>}
+ */
+function parseMultipart(buf, contentType) {
+  const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType || '');
+  const boundary = m ? (m[1] || m[2]).trim() : '';
+  if (!boundary) throw new HttpError(400, 'multipart 请求缺少 boundary');
+  const delim = Buffer.from(`--${boundary}`, 'latin1');
+  const parts = [];
+  let pos = buf.indexOf(delim);
+  while (pos !== -1) {
+    const end = buf.indexOf(delim, pos + delim.length);
+    if (end === -1) break;
+    let body = buf.subarray(pos + delim.length, end);
+    if (body.length >= 2 && body[0] === 0x0d && body[1] === 0x0a) body = body.subarray(2);
+    pos = end;
+    const sep = body.indexOf('\r\n\r\n');
+    if (sep === -1) continue;
+    const headText = body.subarray(0, sep).toString('latin1');
+    let data = body.subarray(sep + 4);
+    if (data.length >= 2 && data[data.length - 2] === 0x0d && data[data.length - 1] === 0x0a) {
+      data = data.subarray(0, data.length - 2);
+    }
+    const nameM = /name="([^"]*)"/i.exec(headText);
+    if (!nameM) continue;
+    const fileM = /filename="([^"]*)"/i.exec(headText);
+    const ctM = /content-type:\s*([^\r\n]+)/i.exec(headText);
+    parts.push({
+      name: nameM[1],
+      filename: fileM ? fileM[1] : null,
+      contentType: ctM ? ctM[1].trim() : '',
+      data: Buffer.from(data),
+    });
+  }
+  return parts;
 }
 
 class HttpError extends Error {
@@ -448,6 +489,58 @@ async function backupInto(filePath, kind) {
   }
   if (kind) log("已备份 " + base + " → .backups/" + path.basename(target) + "（" + kind + "）");
   return ".backups/" + path.basename(target);
+}
+
+/** 目录级备份（瓦片差分合并发布前用）：整树复制到 .backups/，只保留最近 KEEP_BACKUPS 份 */
+async function backupTreeInto(dirPath, kind) {
+  if (!fs.existsSync(dirPath)) return null;
+  await fsp.mkdir(SITE_BACKUP_DIR, { recursive: true });
+  const base = path.basename(dirPath);
+  const suffix = `${String(++backupSequence).padStart(10, '0')}-${randomBytes(6).toString('hex')}`;
+  const target = path.join(SITE_BACKUP_DIR, base + ".bak-" + stamp() + '-' + suffix);
+  await fsp.cp(dirPath, target, { recursive: true });
+  try {
+    const entries = (await fsp.readdir(SITE_BACKUP_DIR))
+      .filter((name) => name.startsWith(base + ".bak-"))
+      .sort();
+    for (const name of entries.slice(0, Math.max(0, entries.length - KEEP_BACKUPS))) {
+      await fsp.rm(path.join(SITE_BACKUP_DIR, name), { recursive: true, force: true });
+    }
+  } catch (err) {
+    console.warn("[server] 清理旧备份失败：", err.message);
+  }
+  log(`已备份 ${base}/ → .backups/${path.basename(target)}/（${kind}）`);
+  return ".backups/" + path.basename(target);
+}
+
+/** 读取站点 config.json（BOM 容忍）；失败抛 HttpError */
+async function readSiteConfig() {
+  const configPath = path.join(SITE_DIR, 'config.json');
+  try {
+    const raw = await fsp.readFile(configPath, 'utf8');
+    return JSON.parse(raw.replace(/^\uFEFF/, ''));
+  } catch (err) {
+    throw new HttpError(500, `读取站点 config.json 失败：${err.message}`);
+  }
+}
+
+/** 维度是否启用了瓦片底图（与合并页/主编辑器同一口径） */
+function dimHasTiles(dim) {
+  const tiles = dim?.tiles;
+  return !!String((typeof tiles === 'string' ? tiles : tiles?.manifest) || '').trim();
+}
+
+/** 从站点配置里取瓦片维度（不存在/未启用瓦片时抛 HttpError） */
+async function requireTileDimension(dimensionId) {
+  const config = await readSiteConfig();
+  const dim = Array.isArray(config?.dimensions)
+    ? config.dimensions.find((d) => String(d?.id) === dimensionId)
+    : null;
+  if (!dim) throw new HttpError(404, `站点配置里没有维度「${dimensionId}」`);
+  if (!dimHasTiles(dim)) {
+    throw new HttpError(422, `维度「${dimensionId}」没有启用瓦片底图，请先在主编辑器里为它生成瓦片`);
+  }
+  return dim;
 }
 
 /** 统计文件里各维度的路径点数量（文件不存在返回 0） */
@@ -733,6 +826,163 @@ async function handleApi(req, res, url) {
     } finally {
       await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  if (route === '/api/merge-tiles/analyze' && method === 'POST') {
+    const buf = await readBody(req, MERGE_UPLOAD_LIMIT);
+    const parts = parseMultipart(buf, req.headers['content-type']);
+    const field = (name) => {
+      const part = parts.find((p) => p.name === name && !p.filename);
+      return part ? part.data.toString('utf8') : '';
+    };
+    const files = parts.filter((p) => p.filename);
+    const dim = safeDimensionId(field('dim'));
+    if (!files.length) throw new HttpError(400, '没有上传任何新图文件');
+    const fillNew = String(field('fillNew') || '1') === '1';
+    const updateChanged = String(field('updateChanged') || '1') === '1';
+    const clamp255 = (value, fallback) => {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0 ? Math.min(255, Math.max(0, n)) : fallback;
+    };
+    const voidLuminance = clamp255(field('voidLuminance'), 8);
+    const diffThreshold = clamp255(field('diffThreshold'), 24);
+
+    await requireTileDimension(dim);
+    const baseDir = path.join(SITE_DIR, 'tiles', dim);
+    const manifestPath = path.join(baseDir, 'manifest.json');
+    const stat = await fsp.stat(manifestPath).catch(() => null);
+    if (!stat || !stat.isFile()) throw new HttpError(404, `维度「${dim}」的瓦片不存在：${manifestPath}`);
+
+    // 上传文件落盘（只收 PNG / 区域 zip，文件名必须是 Xaero 命名，避免路径穿越）
+    const uploadDir = path.join(DATA_DIR, 'merge-uploads', dim);
+    await fsp.rm(uploadDir, { recursive: true, force: true });
+    await fsp.mkdir(uploadDir, { recursive: true });
+    let savedFiles = 0;
+    for (const part of files) {
+      const name = path.basename(String(part.filename || '')).trim();
+      if (!name || name.includes('\0')) continue;
+      const ext = path.extname(name).toLowerCase();
+      // 与 tools/xaero-tiles.mjs 的 parseExportName/parseRegionName 同一口径
+      if (ext === '.png') {
+        if (!/x(-?\d+)_z(-?\d+)\.png$/i.test(name)) {
+          throw new HttpError(422, `文件名不符合 Xaero 命名：${name}（PNG 需带 x<X>_z<Z>）`);
+        }
+      } else if (ext === '.zip') {
+        if (!/(-?\d+)_(-?\d+)\.zip$/i.test(name)) {
+          throw new HttpError(422, `文件名不符合 Xaero 命名：${name}（zip 需为 <rx>_<rz>.zip）`);
+        }
+      } else {
+        continue;
+      }
+      await fsp.writeFile(path.join(uploadDir, name), part.data, { flag: 'wx' });
+      savedFiles += 1;
+    }
+    if (!savedFiles) throw new HttpError(422, '上传的文件里没有可用的 PNG 或区域 zip');
+
+    // 合成到临时目录，成功后入队原子替换 staging（同维度重复分析最后提交的生效）
+    const stagingTmp = path.join(DATA_DIR, 'merge-staging', `.tmp-${dim}-${stamp()}-${randomBytes(3).toString('hex')}`);
+    const stagingDir = path.join(DATA_DIR, 'merge-staging', dim);
+    const started = Date.now();
+    let result;
+    try {
+      result = await mergeTileSets({
+        baseDir,
+        incomingDir: uploadDir,
+        outDir: stagingTmp,
+        voidLuminance,
+        diffThreshold,
+        fillNew,
+        updateChanged,
+      });
+      await enqueueMutation(() => replaceDirectory(stagingTmp, stagingDir));
+    } finally {
+      await fsp.rm(stagingTmp, { recursive: true, force: true }).catch(() => {});
+    }
+
+    const summary = {
+      ok: true,
+      dim,
+      staged: true,
+      fillNew,
+      updateChanged,
+      counts: result.counts,
+      blocksArea: result.blocksArea,
+      grid: result.grid,
+      incoming: {
+        kind: result.manifest.stats.kind,
+        images: result.manifest.stats.images,
+        regions: result.manifest.stats.regions,
+        decoded: result.manifest.stats.decoded,
+        skipped: result.manifest.stats.skipped,
+      },
+      base: {
+        tileSize: result.manifest.tileSize,
+        bounds: result.manifest.worldBlockRange,
+        levels: result.manifest.levels.length,
+        baseTiles: result.manifest.stats.baseTiles,
+      },
+      durationMs: result.durationMs,
+    };
+    log(`瓦片差分分析完成：${dim} 新增 ${result.counts.onlyIncoming} · 变更 ${result.counts.changed} · 仅目标图 ${result.counts.onlyBase}（${summary.durationMs}ms）`);
+    return sendJson(res, 200, summary);
+  }
+
+  if (route === '/api/merge-tiles/apply' && method === 'POST') {
+    return enqueueMutation(async (body) => {
+      const dim = safeDimensionId(body.dim);
+      await requireTileDimension(dim);
+      const stagingDir = path.join(DATA_DIR, 'merge-staging', dim);
+      const stagingManifest = path.join(stagingDir, 'manifest.json');
+      const stat = await fsp.stat(stagingManifest).catch(() => null);
+      if (!stat || !stat.isFile()) {
+        throw new HttpError(409, '还没有分析结果：请先在合并页点「分析差异」，再保存');
+      }
+      let manifest;
+      try {
+        manifest = JSON.parse(await fsp.readFile(stagingManifest, 'utf8'));
+      } catch (err) {
+        throw new HttpError(500, `暂存结果损坏，请重新分析：${err.message}`);
+      }
+      if (
+        !(Number.isInteger(manifest.tileSize) && manifest.tileSize > 0) ||
+        !Array.isArray(manifest.levels) || !manifest.levels.length ||
+        !manifest.worldBlockRange || !(manifest.worldBlockRange.xMax > manifest.worldBlockRange.xMin)
+      ) {
+        throw new HttpError(500, '暂存结果结构无效，请重新分析');
+      }
+
+      const outDir = path.join(SITE_DIR, 'tiles', dim);
+      const tmpDir = path.join(SITE_DIR, 'tiles', `.tmp-merge-${dim}-${stamp()}-${randomBytes(3).toString('hex')}`);
+      await fsp.cp(stagingDir, tmpDir, { recursive: true });
+      const backup = await backupTreeInto(outDir, 'merge-tiles');
+      try {
+        await replaceDirectory(tmpDir, outDir);
+      } finally {
+        await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      }
+      await fsp.rm(path.join(DATA_DIR, 'merge-uploads', dim), { recursive: true, force: true }).catch(() => {});
+      await appendSaveLog({
+        event: 'merge-tiles-apply',
+        siteDir: SITE_DIR,
+        dimensionId: dim,
+        backup,
+        stats: manifest.stats,
+      });
+      log(
+        `已发布瓦片差分合并结果 → tiles/${dim}/（${manifest.stats.tilesWritten} 张瓦片，` +
+          `${manifest.levels.length} 层）${backup ? `，原瓦片备份为 ${backup}/` : ''}`,
+      );
+      return sendJson(res, 200, {
+        ok: true,
+        dim,
+        tiles: `tiles/${dim}`,
+        backup,
+        tileSize: manifest.tileSize,
+        levels: manifest.levels.length,
+        tilesWritten: manifest.stats.tilesWritten,
+        appliedAt: new Date().toISOString(),
+      });
+    }, readJsonBody(req));
   }
 
   throw new HttpError(404, `未知接口：${method} ${route}`);
