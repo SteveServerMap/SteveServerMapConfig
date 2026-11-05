@@ -48,6 +48,8 @@ const opt = (name, fallback) => {
 };
 const OUT = opt('out', null);
 const MAX_SIDE = Number(opt('max', 0)) || 0;
+/** 整数降采样倍数：2 = 每个输出像素代表 2×2 方块（用来把 8 万方块宽的世界塞进一张图） */
+const SCALE = Math.max(1, Math.floor(Number(opt('scale', 1)) || 1));
 
 if (!target || !OUT) {
   console.error('用法：node tools/xaero-decode.mjs <region-xxx.zip | 目录> --out=<输出.png> [--max=4096]');
@@ -221,9 +223,14 @@ function fallbackColor(blockId) {
 
 function colorOf(blockId) {
   if (!blockId) return null;
+  const short = blockId.replace('minecraft:', '');
+  // 防挖矿：所有矿石统一按石头色渲染，避免地图暴露矿点
+  if (/_ore$/.test(short) || short === 'ancient_debris' || short === 'raw_iron_block'
+      || short === 'raw_copper_block' || short === 'raw_gold_block' || /^deepslate_.*_ore$/.test(short)) {
+    return BLOCK_COLORS.get('minecraft:stone');
+  }
   const hit = BLOCK_COLORS.get(blockId);
   if (hit) return hit;
-  const short = blockId.replace('minecraft:', '');
   if (short.includes('leaves')) return BLOCK_COLORS.get('minecraft:oak_leaves');
   if (short.includes('water') || short === 'ocean') return BLOCK_COLORS.get('minecraft:water');
   if (short.includes('grass')) return BLOCK_COLORS.get('minecraft:grass_block');
@@ -506,21 +513,35 @@ async function main() {
     console.log(`--max=${MAX_SIDE}：只渲染第一个区域`);
   }
 
-  const canvas = Buffer.alloc(width * height * 4);
+  // 降采样后的输出尺寸
+  const outW = Math.max(1, Math.floor(width / SCALE));
+  const outH = Math.max(1, Math.floor(height / SCALE));
+  const canvas = Buffer.alloc(outW * outH * 4);
   for (const { rx, rz, result } of withCoords) {
     const ox = (rx - (MAX_SIDE ? 0 : minX)) * REGION_BLOCKS;
     const oz = (rz - (MAX_SIDE ? 0 : minZ)) * REGION_BLOCKS;
     for (let y = 0; y < REGION_BLOCKS; y += 1) {
-      const srcStart = y * REGION_BLOCKS * 4;
-      const dstStart = ((oz + y) * width + ox) * 4;
-      canvas.set(result.blocks.subarray(srcStart, srcStart + REGION_BLOCKS * 4), dstStart);
+      const outY = Math.floor((oz + y) / SCALE);
+      if (outY >= outH) continue;
+      for (let x = 0; x < REGION_BLOCKS; x += 1) {
+        const src = (y * REGION_BLOCKS + x) * 4;
+        if (!result.blocks[src + 3]) continue;
+        const outX = Math.floor((ox + x) / SCALE);
+        if (outX >= outW) continue;
+        const dst = (outY * outW + outX) * 4;
+        if (canvas[dst + 3]) continue; // 先写的优先（同一格只取第一个探到的方块）
+        canvas[dst] = result.blocks[src];
+        canvas[dst + 1] = result.blocks[src + 1];
+        canvas[dst + 2] = result.blocks[src + 2];
+        canvas[dst + 3] = 255;
+      }
     }
   }
 
   const outPath = path.resolve(OUT);
   await fsp.mkdir(path.dirname(outPath), { recursive: true });
-  await fsp.writeFile(outPath, encodePng(width, height, canvas));
-  console.log(`\n输出：${outPath}（${width}×${height} px）`);
+  await fsp.writeFile(outPath, encodePng(outW, outH, canvas));
+  console.log(`\n输出：${outPath}（${outW}×${outH} px，降采样 ×${SCALE}）`);
   console.log(`世界坐标范围：X ${(MAX_SIDE ? 0 : minX) * REGION_BLOCKS}..${((MAX_SIDE ? 0 : maxX) + 1) * REGION_BLOCKS} · Z ${(MAX_SIDE ? 0 : minZ) * REGION_BLOCKS}..${((MAX_SIDE ? 0 : maxZ) + 1) * REGION_BLOCKS}`);
 }
 
