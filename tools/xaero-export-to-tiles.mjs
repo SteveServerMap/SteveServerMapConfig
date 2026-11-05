@@ -9,7 +9,10 @@ const args = process.argv.slice(2);
 const target = args.find((a) => !a.startsWith('--'));
 const opt = (n, d) => { const h = args.find((a) => a.startsWith(`--${n}=`)); return h ? h.slice(n.length + 3) : d; };
 const OUT = opt('out', '.data/tiles/export');
-const TILE = 256;
+const TILE = Math.max(64, Math.floor(Number(opt('tile', 256)) || 256));
+/** 未探索区域在 Xaero 导出里是纯黑；默认转成透明（--keep-black 可保留） */
+const KEEP_BLACK = args.includes('--keep-black');
+const BLACK_THRESHOLD = Number(opt('black-threshold', 10));
 if (!target) { console.error('用法：node tools/xaero-export-to-tiles.mjs <导出目录> --out=.data/tiles/xxx'); process.exit(2); }
 
 /* PNG 解码（RGBA/RGB 8bit） */
@@ -69,6 +72,18 @@ for (const img of imgs) {
   }
 }
 console.log(`拼接后 ${fullW}×${fullH} px`);
+let transparentPx = 0;
+if (!KEEP_BLACK) {
+  // 纯黑（未探索）→ 透明
+  for (let i = 0; i < fullW * fullH; i += 1) {
+    const o = i * 4;
+    if (canvas[o] <= BLACK_THRESHOLD && canvas[o + 1] <= BLACK_THRESHOLD && canvas[o + 2] <= BLACK_THRESHOLD) {
+      canvas[o + 3] = 0;
+      transparentPx += 1;
+    }
+  }
+  console.log(`未探索黑底 → 透明：${transparentPx} 像素（${(transparentPx / (fullW * fullH) * 100).toFixed(1)}%）`);
+}
 
 // 切瓦片 + 金字塔
 const outDir = path.resolve(OUT);

@@ -354,6 +354,29 @@ function draw() {
       drawn += 1;
     }
   }
+  // 坐标网格（间距随缩放在 16..16384 方块之间自动选择）
+  const gridStep = (() => {
+    const target = 120 / scale;
+    const candidates = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384];
+    return candidates.find((c) => c >= target) || 16384;
+  })();
+  ctx.strokeStyle = 'rgba(90, 210, 111, 0.20)';
+  ctx.lineWidth = 1;
+  ctx.fillStyle = 'rgba(170, 210, 175, 0.6)';
+  ctx.font = '11px ui-monospace, monospace';
+  const halfW = cv.width / 2 / scale;
+  const halfH = cv.height / 2 / scale;
+  for (let gx = Math.ceil((camX - halfW) / gridStep) * gridStep; gx <= camX + halfW; gx += gridStep) {
+    const sx = (gx - camX) * scale + cv.width / 2;
+    ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, cv.height); ctx.stroke();
+    ctx.fillText(String(gx), sx + 3, 14);
+  }
+  for (let gz = Math.ceil((camZ - halfH) / gridStep) * gridStep; gz <= camZ + halfH; gz += gridStep) {
+    const sy = (gz - camZ) * scale + cv.height / 2;
+    ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(cv.width, sy); ctx.stroke();
+    ctx.fillText(String(gz), 4, sy - 3);
+  }
+
   hud.innerHTML = \`层级 <b>\${lv}</b> · 1 像素 = \${bpp} 方块 · 缩放 <b>\${scale.toFixed(2)}</b> px/方块\\n世界坐标 <b>\${Math.round(camX)}, \${Math.round(camZ)}</b>\\n瓦片 \${drawn} 绘制 / \${missing} 加载中 · 滚轮缩放 · 拖动平移\`;
   if (missing) setTimeout(() => { if (!running) return; draw(); }, 120);
 }
