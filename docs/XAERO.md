@@ -110,6 +110,38 @@ Xaero 导出的是 1 px/方块、可能几十张的大图，站点现在的「�
 内联方块状态 NBT 长这样（实测）：`0a 00 00 08 00 02 "id" <len> "minecraft:gravel" 00`；带属性时还有 `properties` 子 compound。
 调色板按写入顺序累积：索引 = 写入时 `HashMap.size()`。
 
+### 已确认的流布局（8.8，按字节码 + 实测）
+
+```
+[6 字节头]  0xFF | int(major<<16|minor) | byte flags
+[区块循环]  外层 chunkX(0..7)、内层 chunkZ(0..7)：
+            仅「includeInSave」的区块才写：byte((chunkX << 4) | chunkZ)     ← 区块标记
+            然后是 4×4 个 tile（外层 tx、内层 tz）：
+              空 tile  → writeInt(-1)                                   ← 4 字节
+              有数据   → 256 个方块（x 外层 16、z 内层 16，逐个 savePixel）
+                         + byte worldInterpretationVersion
+                         + int  caveStart
+                         + byte caveDepth                               ← 6 字节尾
+```
+
+Overlay（方块上的"覆盖层"，如草/雪）的参数位域：
+
+| 位 | 含义 |
+| --- | --- |
+| bit0 | 有方块状态（**0 = 水层，后面不写状态**） |
+| bit4.. | light |
+| bits11..14 | opacity & 15 |
+| bit10 (`0x400`) | 状态以 NBT 内联（否则写 int 调色板索引） |
+
+实测对照（4 个区域，首段内联 NBT 的偏移与 flags）：
+
+| 区域 | flags | 首个 NBT 偏移 | 说明 |
+| --- | --- | --- | --- |
+| -100_-12 | 0 | 10 | 头 6 + 首方块 parametres 4 + NBT |
+| -101_-12 | 0 | 18 | 头 6 + 两个空 tile(8) + parametres 4 + NBT |
+| -103_-13 | 1 | 10 | 同上（flags 不影响区块数据的起点） |
+| -102_-13 | 7 | 22 | 头 6 + 四个空 tile(16) + … |
+
 **当前进度**：`tools/xaero-decode.mjs` 已实现 zip 解包、NBT 读取、`parametres` 位域、逐方块解出方块 ID 并渲染 PNG；
 卡在**区块存在表/区块头的确切字节数**上（头部之后到第一段内联 NBT 之间还有 10 字节没对上），
 下一步用"自适应布局探测"（尝试 8 字节位图 / 64 字节数组 / 各 int 组合，取能连续解出合法 `minecraft:*` ID 的那种）来定死。

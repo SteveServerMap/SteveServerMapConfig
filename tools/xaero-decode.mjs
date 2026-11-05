@@ -112,12 +112,11 @@ function makeNbtReader(buf) {
       case 10: {
         const obj = {};
         for (let guard = 0; guard < 4096; guard += 1) {
-          const t = buf[p];
-          if (t === 0) { p += 1; return obj; }
+          const t = read(1)[0];
+          if (t === 0) return obj;
           const nameLen = read(2).readUInt16BE(0);
           const name = read(nameLen).toString('utf8');
-          const tt = read(1)[0];
-          obj[name] = payload(tt);
+          obj[name] = payload(t);
         }
         return obj;
       }
@@ -240,7 +239,6 @@ function colorOf(blockId) {
  * 返回 { version, flags, caveStart, caveDepth, width, height, blocks: Uint8Array(512*512*4) }
  */
 function decodeRegionPayload(payload) {
-  const reader = makeNbtReader(payload);
   let p = 0;
   const u8 = () => {
     if (p >= payload.length) throw new RangeError('读越界');
@@ -261,22 +259,11 @@ function decodeRegionPayload(payload) {
     return v;
   };
 
+  // 头部只有 6 字节：魔数(1) + 版本 int(4) + flags(1)
   const magic = u8();
   const versionRaw = i32();
   const version = { major: versionRaw >>> 16, minor: versionRaw & 0xffff };
   const flags = u8();
-  let worldInterpretationVersion = 0;
-  if (flags & 2) worldInterpretationVersion = u8();
-  let caveStart = null;
-  let caveDepth = null;
-  if (flags & 4) {
-    caveStart = i32();
-    caveDepth = u8();
-  }
-
-  // 8×8 区块存在表
-  const present = [];
-  for (let i = 0; i < CHUNKS * CHUNKS; i += 1) present.push(u8());
 
   const width = REGION_BLOCKS;
   const height = REGION_BLOCKS;
@@ -286,46 +273,38 @@ function decodeRegionPayload(payload) {
   const blockPalette = [];
   const biomePalette = [];
   let pixels = 0;
+  let tiles = 0;
+  let emptyTiles = 0;
 
-  const readParametres = () => i32();
-
-  for (let cz = 0; cz < CHUNKS; cz += 1) {
-    for (let cx = 0; cx < CHUNKS; cx += 1) {
-      const state = present[cz * CHUNKS + cx];
-      if (!state) continue;
-      // chunk 头部（tileGridCache 等）：一个 int，之后再逐 tile
-      i32();
-      for (let tz = 0; tz < TILES; tz += 1) {
-        for (let tx = 0; tx < TILES; tx += 1) {
-          const tileFlag = i32();
-          if (!tileFlag) continue;
-          for (let by = 0; by < TILE_BLOCKS; by += 1) {
-            for (let bx = 0; bx < TILE_BLOCKS; bx += 1) {
-              const parametres = readParametres();
+  // 区块顺序：外层 x(0..7)，内层 z(0..7)；每个区块 4×4 个 tile（外层 tx，内层 tz）
+  for (let cx = 0; cx < CHUNKS; cx += 1) {
+    for (let cz = 0; cz < CHUNKS; cz += 1) {
+      for (let tx = 0; tx < TILES; tx += 1) {
+        for (let tz = 0; tz < TILES; tz += 1) {
+          // 空 tile 只写一个 -1；有数据的 tile 直接就是第一个方块的 parametres
+          const firstParametres = i32();
+          if (firstParametres === -1) {
+            emptyTiles += 1;
+            continue;
+          }
+          tiles += 1;
+          // 256 个方块：x 外层、z 内层
+          for (let bx = 0; bx < TILE_BLOCKS; bx += 1) {
+            for (let bz = 0; bz < TILE_BLOCKS; bz += 1) {
+              const parametres = bx === 0 && bz === 0 ? firstParametres : i32();
               const hasState = (parametres & 1) !== 0;
               const hasOverlays = (parametres & 2) !== 0;
               const hasBiome = (parametres & 0x100000) !== 0;
               const stateInline = (parametres & 0x200000) !== 0;
               const biomeInline = (parametres & 0x400000) !== 0;
               const hasTopHeight = (parametres & 0x1000000) !== 0;
-              const heightLow = (parametres >>> 12) & 0xff;
-              const heightHigh = (parametres >>> 25) & 0xf;
-              const blockHeight = (heightHigh << 8) | heightLow;
 
               let blockId = null;
               if (hasState) {
                 if (stateInline) {
-                  const nbtOffset = p;
-                  let nbt = null;
-                  try {
-                    const r = makeNbtReader(payload.subarray(p));
-                    nbt = r.readRoot();
-                    p += r.offset;
-                  } catch {
-                    // 内联 NBT 解析失败：按"未知方块"处理并尽量跳过
-                    p = nbtOffset;
-                    throw new Error(`内联 NBT 解析失败 @${nbtOffset}`);
-                  }
+                  const reader = makeNbtReader(payload.subarray(p));
+                  const nbt = reader.readRoot();
+                  p += reader.offset;
                   blockId = typeof nbt?.id === 'string' ? nbt.id : null;
                   blockPalette.push(blockId);
                 } else {
@@ -337,31 +316,31 @@ function decodeRegionPayload(payload) {
               if (hasOverlays) {
                 const overlays = u8();
                 for (let o = 0; o < overlays; o += 1) {
-                  // Overlay：先读 1 个 int 参数，再可能是内联 NBT / 调色板索引
                   const overlayParam = i32();
-                  const overlayInline = (overlayParam & 0x200000) !== 0;
-                  if (overlayInline) {
-                    const r = makeNbtReader(payload.subarray(p));
-                    r.readRoot();
-                    p += r.offset;
-                  } else {
-                    i32();
+                  const overlayHasState = (overlayParam & 1) !== 0;
+                  if (overlayHasState) {
+                    if ((overlayParam & 0x400) !== 0) {
+                      const reader = makeNbtReader(payload.subarray(p));
+                      reader.readRoot();
+                      p += reader.offset;
+                    } else {
+                      i32();
+                    }
                   }
                 }
               }
               if (hasBiome) {
                 if (biomeInline) {
                   const len = i16();
-                  const id = payload.toString('utf8', p, p + len);
+                  biomePalette.push(payload.toString('utf8', p, p + len));
                   p += len;
-                  biomePalette.push(id);
                 } else {
                   i32();
                 }
               }
 
               const worldX = cx * TILES * TILE_BLOCKS + tx * TILE_BLOCKS + bx;
-              const worldZ = cz * TILES * TILE_BLOCKS + tz * TILE_BLOCKS + by;
+              const worldZ = cz * TILES * TILE_BLOCKS + tz * TILE_BLOCKS + bz;
               const color = colorOf(blockId);
               if (color) {
                 const out = (worldZ * width + worldX) * 4;
@@ -373,12 +352,29 @@ function decodeRegionPayload(payload) {
               }
             }
           }
+          // tile 尾：worldInterpretationVersion(1) + caveStart(4) + caveDepth(1)
+          u8();
+          i32();
+          u8();
         }
       }
     }
   }
 
-  return { version, flags, worldInterpretationVersion, caveStart, caveDepth, width, height, blocks, pixels, blockPalette, biomePalette };
+  return {
+    version,
+    flags,
+    magic,
+    width,
+    height,
+    blocks,
+    pixels,
+    tiles,
+    emptyTiles,
+    remaining: payload.length - p,
+    blockPalette,
+    biomePalette,
+  };
 }
 
 /* -------------------------------- PNG 编码 -------------------------------- */
@@ -464,7 +460,7 @@ async function main() {
       results.push({ file, result });
       console.log(
         `${path.basename(file)}: v${result.version.major}.${result.version.minor} flags=${result.flags} ` +
-          `caveStart=${result.caveStart} caveDepth=${result.caveDepth} 调色板=${result.blockPalette.length} 已解码方块=${result.pixels}`,
+          `tile=${result.tiles}/空=${result.emptyTiles} 调色板=${result.blockPalette.length} 方块=${result.pixels} 剩余字节=${result.remaining}`,
       );
     } catch (err) {
       console.log(`${path.basename(file)}: 解码失败 —— ${err.message}`);
