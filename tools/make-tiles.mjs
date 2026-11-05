@@ -333,6 +333,8 @@ function draw() {
   const bpp = L.blocksPerPixel; // 该层 1 像素代表多少方块
   const pxPerBlock = scale / bpp; // 该层瓦片像素在屏幕上的缩放
   ctx.setTransform(1, 0, 0, 1, 0, 0);
+  // 关键：放大时用最近邻采样，否则 1px=1方块的像素图会被插值糊掉
+  ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, cv.width, cv.height);
   const halfW = cv.width / 2 / scale;
   const halfH = cv.height / 2 / scale;
