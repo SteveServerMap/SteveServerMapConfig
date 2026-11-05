@@ -191,6 +191,8 @@ export class EditorCanvas {
     this._pointers = new Map();    // pointerId -> {x, y}（client 坐标）
     this._pan = null;
     this._markerDrag = null;
+    /** 是否允许「按住标记直接拖动」；默认关闭（避免误拖），由 app 的「拖动移动」开关或 Alt 键临时启用 */
+    this._dragMoveEnabled = false;
     this._pinch = null;
     this._rect = null;             // 交互期间缓存的容器 clientRect
     this._anim = 0;
@@ -1027,6 +1029,16 @@ export class EditorCanvas {
    *   place ：点击空白处放置新路径点（回调 onEmptyClick，光标十字）
    *   pick  ：校准拾取（点击地图回调 onPickPoint，不选中也不拖拽标记）
    */
+  /** 开启/关闭「拖动标记移动」；关闭时按住标记拖动不会改变坐标（Alt 键可临时启用） */
+  setDragMoveEnabled(enabled) {
+    this._dragMoveEnabled = enabled === true;
+    return this._dragMoveEnabled;
+  }
+
+  getDragMoveEnabled() {
+    return this._dragMoveEnabled === true;
+  }
+
   setMode(mode) {
     const next = MODES.includes(mode) ? mode : 'select';
     this._mode = next;
@@ -1538,6 +1550,8 @@ export class EditorCanvas {
     const markerEl = this._mode === 'pick' ? null : this._markerFromTarget(event.target);
     if (markerEl) {
       const id = String(markerEl.dataset.id);
+      // 默认不允许直接拖动（避免不小心把点拖走）；「拖动移动」开关开启或按住 Alt 时才可拖
+      const dragable = this._dragMoveEnabled === true || event.altKey === true;
       this._markerDrag = {
         pointerId: event.pointerId,
         id,
@@ -1545,13 +1559,14 @@ export class EditorCanvas {
         startX: event.clientX,
         startY: event.clientY,
         started: false,
+        dragable,
         world: null,
         screen: null,
         client: null,
         px: NaN,
         py: NaN,
       };
-      this._setCursor('grab');
+      this._setCursor(dragable ? 'grab' : 'pointer');
       return;
     }
 
@@ -1587,6 +1602,7 @@ export class EditorCanvas {
     if (drag && drag.pointerId === event.pointerId) {
       const dx = event.clientX - drag.startX;
       const dy = event.clientY - drag.startY;
+      if (!drag.dragable) return; // 拖动未启用：保持「点击选中」语义，不移动
       if (!drag.started && Math.hypot(dx, dy) > MARKER_DRAG_THRESHOLD) {
         drag.started = true;
         drag.el.classList.add('is-dragging');

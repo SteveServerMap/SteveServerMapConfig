@@ -2190,6 +2190,120 @@ async function dragMarker(ctx, markerId, target) {
  *   ⑤ 切换选中会自动取消 place。
  * 结束后撤销回原状（不影响后面的用例）。
  */
+
+/**
+ * §7.5d 「拖动移动」开关（用户反馈：鼠标能直接拖动路径点，容易误拖）：
+ *   ① 默认关闭：按住路径点拖动不改坐标；
+ *   ② 点 #btn-drag-move 开启后可拖；
+ *   ③ 关掉开关后按住 Alt 仍可临时拖。
+ */
+async function checkDragMove(ctx) {
+  const page = ctx.page;
+
+  /** 取画布上第一个「可见」的标记（rect 有效），返回 id 与中心点 */
+  const firstVisibleMarker = () =>
+    page.evalFn(() => {
+      const markers = [...document.querySelectorAll('#canvas-overlay .marker')];
+      for (const el of markers) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 4 && rect.height > 4) {
+          return { id: String(el.dataset.id), x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+        }
+      }
+      return null;
+    });
+
+  /** 从草稿里读某个路径点的坐标 */
+  const readWp = (id) =>
+    page.evalFn((wpId) => {
+      const tool = window.__tool;
+      if (!tool || typeof tool.draft !== 'function') return null;
+      const draft = tool.draft();
+      const dimId = document.body.dataset.dimension;
+      const dim = draft.dimensions.find((d) => String(d.id) === String(dimId)) || draft.dimensions[0];
+      const wp = dim && dim.waypoints.find((w) => String(w.id) === String(wpId));
+      return wp ? { x: Number(wp.x), z: Number(wp.z) } : null;
+    }, id);
+
+  /** 真实 pointer 拖拽（可带 Alt） */
+  const drag = async (from, dx, dy, { alt = false } = {}) => {
+    const modifiers = alt ? 1 : 0;
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y, button: 'none', modifiers });
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', clickCount: 1, modifiers });
+    for (let step = 1; step <= 10; step += 1) {
+      await page.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: from.x + Math.round((dx * step) / 10),
+        y: from.y + Math.round((dy * step) / 10),
+        button: 'left',
+        modifiers,
+      });
+      await page.settle(16);
+    }
+    await page.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: from.x + dx,
+      y: from.y + dy,
+      button: 'left',
+      clickCount: 1,
+      modifiers,
+    });
+    await page.settle(340);
+  };
+
+  const pressedOf = () => page.evalFn(() => document.getElementById('btn-drag-move')?.getAttribute('aria-pressed'));
+
+  /* ① 默认关闭：拖拽不改坐标 */
+  const pressed0 = await pressedOf();
+  assert(pressed0 === 'false', `#btn-drag-move 初始 aria-pressed=${pressed0}，期望 'false'`);
+
+  const grip0 = await firstVisibleMarker();
+  assert(grip0, '画布上没有可见的路径点标记，无法测试拖动');
+  const before = await readWp(grip0.id);
+  assert(before, `草稿里找不到路径点 ${grip0.id}`);
+
+  await drag(grip0, 72, 48);
+  const afterDisabled = await readWp(grip0.id);
+  assert(
+    afterDisabled && afterDisabled.x === before.x && afterDisabled.z === before.z,
+    `关闭「拖动移动」时拖拽不应改坐标：before ${JSON.stringify(before)} → after ${JSON.stringify(afterDisabled)}`,
+  );
+
+  /* ② 开启后可拖 */
+  await page.evalFn(() => document.getElementById('btn-drag-move').click());
+  await page.settle(280);
+  const pressed1 = await pressedOf();
+  assert(pressed1 === 'true', `点「拖动移动」后 aria-pressed=${pressed1}，期望 'true'`);
+
+  const grip1 = await firstVisibleMarker();
+  assert(grip1, '开启拖动后画布上找不到标记');
+  const beforeEnabled = await readWp(grip1.id);
+  await drag(grip1, 66, 42);
+  const afterEnabled = await readWp(grip1.id);
+  assert(
+    afterEnabled && (afterEnabled.x !== beforeEnabled.x || afterEnabled.z !== beforeEnabled.z),
+    `开启「拖动移动」后拖拽应改坐标，实际仍为 ${JSON.stringify(afterEnabled)}`,
+  );
+
+  /* ③ 关闭后 Alt 临时可拖 */
+  await page.evalFn(() => document.getElementById('btn-drag-move').click());
+  await page.settle(280);
+  const pressed2 = await pressedOf();
+  assert(pressed2 === 'false', `再次点击后 aria-pressed=${pressed2}，期望 'false'`);
+
+  const grip2 = await firstVisibleMarker();
+  assert(grip2, 'Alt 拖动前画布上找不到标记');
+  const beforeAlt = await readWp(grip2.id);
+  await drag(grip2, -58, -34, { alt: true });
+  const afterAlt = await readWp(grip2.id);
+  assert(
+    afterAlt && (afterAlt.x !== beforeAlt.x || afterAlt.z !== beforeAlt.z),
+    `按住 Alt 拖拽应改坐标，实际仍为 ${JSON.stringify(afterAlt)}`,
+  );
+
+  return `默认不可拖（${JSON.stringify(before)} 未变）· 开启后可拖 ${JSON.stringify(beforeEnabled)}→${JSON.stringify(afterEnabled)} · Alt 临时拖 ${JSON.stringify(afterAlt)}`;
+}
+
 async function checkPlaceMode(ctx) {
   const page = ctx.page;
   await selectDimension(ctx, 'overworld', '主世界');
@@ -2990,6 +3104,7 @@ const CHECKS = [
   { id: 'c5b-save-verify', label: '§7.5b 保存 → 站点 config.json：JSON.parse + schema + 新点存在', requires: ['waypointAdded'], run: checkSaveVerify, setsFlag: 'saved' },
   { id: 'x2-backup', label: '扩展：保存把写前备份写到 .backups/（JSON 可解析、点数正确、根目录无散落 bak）', requires: ['saved'], run: checkBackup },
   { id: 'c5c-place', label: '§7.5c 交互语义：新建=select →「在图上取点」→ place → 落位回 select；点空白不移动已选点', requires: ['page'], run: checkPlaceMode },
+  { id: 'c5d-drag', label: '§7.5d 拖动移动开关：默认拖不动 → 开启可拖 → Alt 临时可拖', requires: ['page'], run: checkDragMove },
   { id: 'c6-save-blocked', label: '§7.6 存在 error 时保存被阻止并提示', requires: ['saved'], run: checkSaveBlocked },
   { id: 'c7-preview', label: '§7.7 预览 iframe 渲染出「草稿」路径点数量', requires: ['page'], run: checkPreview },
   { id: 'c8-path-traversal', label: '§7.8 越界写入（../evil.png 等）返回 4xx', requires: ['server'], run: checkPathTraversal },

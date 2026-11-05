@@ -55,6 +55,8 @@ const state = {
   enhancePref: null,
   enhanceOn: false,
 
+  /** 拖动移动开关（默认关闭，从 localStorage 恢复） */
+  dragMove: false,
   /** 放置模式：placeFor = 正在等待点击落位的路径点 id */
   placeFor: null,
   /** 在图上新建：true 时下一次点地图会新建路径点 */
@@ -148,6 +150,7 @@ async function bootstrap() {
   initPanel();
   initCanvas();
   state.enhancePref = readEnhancePref();
+  setDragMove(readDragMovePref(), { silent: true });
   panel?.setImages?.(state.images);
 
   const firstDim =
@@ -401,6 +404,16 @@ function refreshCanvas() {
  *  这里按需给基底图加一个 brightness filter（纯黑仍是黑，不会失真），并记住用户选择。 */
 const ENHANCE_FILTER = 'brightness(2.8) saturate(1.15) contrast(1.02)';
 const ENHANCE_KEY = 'ssm.enhance.v1';
+/** 「拖动移动」开关：默认关闭，避免不小心把路径点拖走 */
+const DRAG_MOVE_KEY = 'ssm.dragMove.v1';
+
+function readDragMovePref() {
+  try {
+    return localStorage.getItem(DRAG_MOVE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
 
 function readEnhancePref() {
   try {
@@ -477,6 +490,38 @@ function autoEnhanceFor(src) {
       );
     }
   });
+}
+
+function toggleDragMove() {
+  return setDragMove(!(state.dragMove === true));
+}
+
+/**
+ * 「拖动移动」开关：
+ *   · 默认关闭 —— 按住路径点拖动不会改坐标（避免误拖），想定位请用「在图上取点」；
+ *   · 开启后可以按住标记直接拖；按住 Alt 键可随时临时拖动，不用先开开关。
+ */
+function setDragMove(enabled, { silent = false } = {}) {
+  state.dragMove = enabled === true;
+  canvas?.setDragMoveEnabled?.(state.dragMove);
+  const btn = $('btn-drag-move');
+  if (btn) {
+    btn.setAttribute('aria-pressed', state.dragMove ? 'true' : 'false');
+    btn.classList.toggle('is-active', state.dragMove);
+  }
+  try {
+    localStorage.setItem(DRAG_MOVE_KEY, state.dragMove ? '1' : '0');
+  } catch {
+    /* 隐私模式下 localStorage 可能不可用，忽略 */
+  }
+  if (state.dragMove) {
+    if (!silent) toast('拖动移动已开启：按住画布上的路径点即可拖动改坐标（再点一次关闭）', 'ok', 3600);
+    setStatus('拖动移动已开启（按住 Alt 也能临时拖）', 'ok');
+  } else if (!silent) {
+    toast('拖动移动已关闭：拖动不会移动路径点，定位请用「在图上取点」', 'info', 3600);
+    setStatus('拖动移动已关闭');
+  }
+  return state.dragMove;
 }
 
 function toggleEnhance() {
@@ -774,6 +819,8 @@ async function handleAction(name) {
       return pickPositionForSelected();
     case 'create-on-map':
       return armCreateOnMap();
+    case 'drag-move':
+      return toggleDragMove();
     case 'goto-calibrate':
       return openCalibrationDialog();
     case 'copy-command':
@@ -1794,6 +1841,7 @@ function bindKeyboard() {
   $('btn-enhance')?.addEventListener('click', toggleEnhance);
   $('btn-pick-position')?.addEventListener('click', () => handleAction('pick-position'));
   $('btn-create-on-map')?.addEventListener('click', () => handleAction('create-on-map'));
+  $('btn-drag-move')?.addEventListener('click', () => toggleDragMove());
 
   $('search')?.addEventListener('input', (event) => {
     state.search = String(event.target.value || '').trim();

@@ -52,6 +52,10 @@
                 title="在图上取点：把选中的路径点移到地图上点击的位置（先选中一个路径点）">
           <svg class="icon"><use href="#i-target"></use></svg><span>在图上取点</span>
         </button>
+        <button id="btn-drag-move" class="btn ghost" type="button" aria-pressed="false"
+                title="拖动移动：开启后可以按住画布上的路径点直接拖动改坐标（默认关闭，避免误拖；按住 Alt 可临时启用）">
+          <svg class="icon"><use href="#i-move"></use></svg><span>拖动移动</span>
+        </button>
         <button id="btn-enhance" class="btn ghost" type="button" aria-pressed="false"
                 title="提亮基底图（很多离线地图渲染很暗，纯黑的是未探索区域）">
           <svg class="icon"><use href="#i-sun"></use></svg><span>提亮</span>
@@ -202,6 +206,7 @@
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2.5h8a2 2 0 012 2V18a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9.5 5l7 7-7 7"/></symbol>
     <symbol id="i-grid" viewBox="0 0 24 24"><path d="M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16"/></symbol>
+    <symbol id="i-move" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></symbol>
     <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></symbol>
   </defs>
 </svg>

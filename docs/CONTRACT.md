@@ -227,6 +227,15 @@ export class EditorPanel {
 
 ---
 
+### 8.7 拖动移动开关（v2，2026-11-05）
+
+- `EditorCanvas` 新增 `setDragMoveEnabled(bool)` / `getDragMoveEnabled()`；**默认 false**。
+- 关闭时：pointerdown 落在标记上只记录「待点击」（`_markerDrag.dragable = false`），pointermove 不产生位移，pointerup 走 `onMarkerClick` → 只选中；
+- 开启时（或 pointerdown 事件带 **Alt**）：`dragable = true`，超过 `MARKER_DRAG_THRESHOLD = 3px` 才开始拖，走原有 `onMarkerDragStart/onMarkerDrag/onMarkerDragEnd` 回调。
+- app 侧：顶栏 `#btn-drag-move`（`aria-pressed` 同步）、状态存 `localStorage['ssm.dragMove.v1']`、启动时 `setDragMove(readDragMovePref(), { silent: true })` 静默恢复；
+  `handleAction('drag-move')` 与按钮都走 `toggleDragMove()`。
+- 回归：e2e `c5d-drag` 验证「默认拖不动 → 开启可拖 → Alt 临时可拖」。
+
 ## 8. 实现定稿补充（v1，Lead 记录）
 
 以下是实现过程中与上文契约对齐/细化的部分，作为最终行为说明。

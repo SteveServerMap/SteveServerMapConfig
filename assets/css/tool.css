@@ -2477,3 +2477,11 @@ body[data-enhance="1"] #canvas-image {
   border-color: var(--accent-line, rgba(90, 210, 111, 0.55));
   background: rgba(90, 210, 111, 0.1);
 }
+
+/* 「拖动移动」开关的激活态（与提亮按钮同一套观感） */
+#btn-drag-move.is-active,
+#btn-drag-move[aria-pressed="true"] {
+  color: var(--accent, #5ad26f);
+  border-color: rgba(90, 210, 111, 0.55);
+  background: rgba(90, 210, 111, 0.12);
+}
