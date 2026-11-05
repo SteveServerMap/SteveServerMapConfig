@@ -281,6 +281,24 @@ cd .data/tiles/export && python -m http.server 8898
 - 若需要更高分辨率：服务器装 **BlueMap / Dynmap / squaremap**（实时、可分更高倍率），或用世界存档跑 Unmined / Chunky
 - Xaero 是**客户端缓存**：服务器插件改过的地形，只有在制图者再次经过该区域时才会更新
 
+### 只有整张 PNG 时：png-to-tiles.mjs
+
+手里只有拼好的整张地图 PNG（没有 Xaero 导出原图 / 区域 zip）、但知道它左上角的世界坐标时，直接切：
+
+```bash
+# 1 px = 1 方块：下界.png 2048×2048，左上角世界坐标 (-1024, -1024)
+node tools/png-to-tiles.mjs 下界.png --x-min=-1024 --z-min=-1024 --out=.data/tiles/nether
+
+# 原图 2 px = 1 方块：末地.png 2048×2048 → --scale=0.5 降采样后 1024×1024，画幅 ±512
+node tools/png-to-tiles.mjs 末地.png --x-min=-512 --z-min=-512 --scale=0.5 --out=.data/tiles/the_end
+```
+
+- `--scale` 只支持 `1/2^k`（1、0.5、0.25…），2×2 平均降采样；`--tile=256` 可改瓦片尺寸
+- 产物与站点 `tiles.js` 契约一致：grid-halving 金字塔（每层瓦片网格对半，直到 1×1）、
+  `worldBlockRange` 向外补齐到瓦片整数倍、所有层级 `originBlockX/Z` = 画幅左上角
+- 站点三个维度当前都走瓦片：主世界（Xaero 导出图管线）、下界 / 末地（本工具整图直切）
+- 测试：`node --test tests/png-to-tiles.test.mjs`（直切 / 降采样 / 非法参数 + 站点 parseManifest 契约校验）
+
 ### 数据清理
 
 `.data/world-map.rar`（253.6 MB 的 Xaero 缓存）已删除，`.data` 只保留导出图与瓦片（约 9 MB）。
