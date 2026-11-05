@@ -229,6 +229,9 @@ export class EditorPanel {
 | POST | `/api/preview-token` | `{ config }` → `{ ok, token }`（内存保存 10 分钟，供 `/preview/config.json?token=` 使用） |
 | GET | `/preview/*` | 站点仓库只读静态；`/preview/config.json` 若带 `token` 则返回该草稿导出的配置 |
 | GET | `/api/health` | `{ ok, version, uptime }` |
+| POST | `/api/merge-tiles/analyze` | multipart：`dim` + `files[]`（Xaero 命名 PNG/区域 zip）+ `fillNew`/`updateChanged`/`voidLuminance`/`diffThreshold` → 逐瓦片差分并把合并结果暂存 `.data/merge-staging/<dim>/`，返回 `{ ok, dim, staged, stagingManifestUrl, stagedGeneratedAt, counts, blocksArea, grid, incoming, base, durationMs }` |
+| POST | `/api/merge-tiles/apply` | `{ dim }` → 校验暂存 manifest → 站点 `tiles/<dim>/` 备份到 `.backups/` 后原子替换 → `{ ok, dim, tiles, backup, tileSize, levels, tilesWritten, appliedAt }` |
+| GET | `/api/merge-staging/<dim>/<file>` | 只读暴露暂存结果（`manifest.json` 或 `tiles/<level>/<x>_<y>.png`），供对比滑块加载；维度名校验 + 文件名白名单 + 路径包含防护，`cache: no-store` |
 
 安全：`/api/save` 与 `/api/import-image` 只允许写到 `siteDir`（`path.resolve` 后必须以 `siteDir` 前缀开头，
 且文件名不得含 `..` 或路径分隔符）。

@@ -174,3 +174,40 @@ export class MergeUI {
 - 「变更」是像素启发式：渲染调色板/光照不同会导致大面积误判，所以必须先看差异叠加层再合并。
 - 大图受浏览器 canvas 限制（单边 >16384 或面积 >2.68 亿像素会失败），超出时给出提示。
 - 只合并 RGB，不处理透明度语义（透明像素视为空白）。
+
+---
+
+## 6. 瓦片差分模式（2026-11-06，Lead）
+
+与单图合并并列的第二种模式：**站点瓦片集 vs 另一套 Xaero 导出**，逐瓦片差分由服务端完成（`tools/tile-merge.mjs`），
+浏览器只负责上传、展示、对比与发布。
+
+### 6.1 服务端
+
+- `POST /api/merge-tiles/analyze`（multipart）：校验文件名（`x<X>_z<Z>.png` / `<rx>_<rz>.zip`）→
+  合成到 `.data/merge-staging/<dim>/`（临时目录 + 原子替换，同维度后分析覆盖前一次）。
+  响应含 `counts` / `blocksArea` / `grid`（level-0 分类色块）/ `stagingManifestUrl` / `stagedGeneratedAt`。
+- `POST /api/merge-tiles/apply`：读暂存 manifest 校验结构 → 站点 `tiles/<dim>/` 备份（`backupTreeInto`）
+  → 原子替换 → 清理上传目录 → 记 `save.log`。
+- `GET /api/merge-staging/<dim>/<file>`：**只读**暂存结果，`manifest.json` 或 `tiles/<level>/<x>_<y>.png`；
+  维度名校验 + 文件名白名单正则 + `path.resolve` 包含防护，其余一律 404。
+- 暂存 manifest 与站点 manifest 的 `worldBlockRange` **恒等**（合并沿用基底范围），这是对比图逐像素对齐的前提。
+
+### 6.2 前端
+
+- 模式切换：`#mg-tiles-*` 面板三栏（左=站点维度 / 中=差异预览 / 右=文件拖放），`MergeUI.setTileDims/setTileBaseInfo/setTileAnalysis`。
+- **对比滑块**（`#mg-compare`，分析成功后显示）：
+  - 动态 `import('/preview/assets/js/tiles.js')`，复用站点的 `parseManifest` + `TileLayer`；
+  - 基底 manifest 走 `/preview/tiles/<dim>/manifest.json`，合并结果走 `stagingManifestUrl`；
+  - 双 canvas 同视图状态（contain 适配、`dpr` 感知层级选择），合并结果 canvas 用 `clip-path: inset(0 0 0 v%)`
+    裁掉左侧，分割线跟随滑块；窗口 resize 重排，发布/失效（`invalidateTiles`）后销毁并隐藏。
+- **更新徽标**：左面板「瓦片更新于 …（今天/昨天/N 天前）」、中面板「合并结果生成于 …」，
+  `formatTileAge` 与站点 `formatGeneratedAt` 同口径（本地午夜 + Math.round 吸收夏令时）。
+- 分析后改参数/文件 → `stale` 标记，保存前必须重新分析。
+
+### 6.3 验收
+
+- `tests/merge-tiles-server.test.mjs`：analyze → apply 全流程（暂存/发布/备份/审计/上传清理）、
+  负向用例（400/404/422/500/409）、暂存只读端点正负用例（含路径穿越）。
+- `tests/merge-tiles-e2e.mjs`：真实页面走查（切模式 → 选维度 → 传文件 → 分析 → 对比滑块 → stale →
+  重分析 → 发布），断言统计、色块画布、双画布渲染、分割线跟随、徽标显隐、发布后资源释放。
