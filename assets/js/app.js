@@ -68,6 +68,9 @@ const state = {
   /** 站点投影模块（来自 /preview/assets/js/coords.js） */
   coords: null,
 
+  /** 站点瓦片模块（来自 /preview/assets/js/tiles.js）：manifest 解析 + 分层贴图 */
+  tileModule: null,
+
   /** 预览 token */
   previewToken: null,
 
@@ -111,8 +114,9 @@ bootstrap().catch((err) => {
 async function bootstrap() {
   setStatus('加载中…', 'info');
 
-  // 1) 站点投影模块（唯一的坐标数学来源）
+  // 1) 站点投影模块（唯一的坐标数学来源）+ 瓦片模块（manifest → Tileset / TileLayer）
   await loadSiteCoords();
+  await loadSiteTiles();
 
   // 2) 站点状态 + 草稿
   const info = await api('/api/state');
@@ -184,6 +188,23 @@ async function loadSiteCoords() {
     console.error('[tool] 载入站点 coords.js 失败：', err);
     state.coords = null;
     toast('无法载入站点坐标模块（/preview/assets/js/coords.js），请检查 --site 参数', 'error', 8000);
+  }
+}
+
+/**
+ * 动态载入站点的 tiles.js（瓦片底图：manifest 解析 / 层级选择 / canvas 贴图）。
+ * 站点仓库较老、没有这个模块时不要整页崩溃：瓦片维度会回退到单张 image。
+ */
+async function loadSiteTiles() {
+  try {
+    state.tileModule = await import('/preview/assets/js/tiles.js');
+    if (typeof state.tileModule.loadTileset !== 'function') {
+      state.tileModule = null;
+      console.warn('[tool] 站点 tiles.js 没有导出 loadTileset，瓦片底图不可用');
+    }
+  } catch (err) {
+    state.tileModule = null;
+    console.warn('[tool] 载入站点 tiles.js 失败，瓦片维度将回退为单张图片：', err);
   }
 }
 
@@ -261,6 +282,29 @@ function projectionFor(dim) {
   const coords = state.coords;
   const meta = (dim && dim.imageMeta) || {};
   if (!coords || !dim || !(meta.width > 0) || !(meta.height > 0)) return null;
+
+  // 瓦片底图：世界范围来自 manifest 的 worldBlockRange（1 像素 = 1 方块），
+  // 和站点一致 —— 此时 calibration 只是单图兜底用的，不参与换算。
+  const tile = dim.tileMeta;
+  if (tile && !tile.error && tile.bounds && Number.isFinite(tile.imageWidth) && Number.isFinite(tile.imageHeight)) {
+    const b = tile.bounds;
+    try {
+      const proj = coords.createProjection({
+        xMin: Number(b.xMin),
+        xMax: Number(b.xMax),
+        zMin: Number(b.zMin),
+        zMax: Number(b.zMax),
+        imageWidth: tile.imageWidth,
+        imageHeight: tile.imageHeight,
+        flipZ: false,
+      });
+      return proj && proj.isValid !== false ? proj : null;
+    } catch (err) {
+      console.warn('[tool] 瓦片投影创建失败：', err);
+      return null;
+    }
+  }
+
   const cal = dim.calibration || {};
   const nums = [cal.xMin, cal.xMax, cal.zMin, cal.zMax].map(Number);
   if (!nums.every(Number.isFinite) || nums[1] <= nums[0] || nums[3] <= nums[2]) return null;
@@ -281,6 +325,19 @@ function projectionFor(dim) {
   }
 }
 
+/** 维度是否配置了瓦片底图（dim.tiles 由 model 规范化成 { manifest } 或 null） */
+function hasTiles(dim) {
+  return Boolean(dim && dim.tiles && String(dim.tiles.manifest || '').trim());
+}
+
+/** 站点相对路径 → 工具可访问的 /preview/ 地址（也接受已是 /preview/* 或 http(s) 的绝对地址） */
+function previewStaticUrl(target) {
+  const raw = String(target || '').trim();
+  if (!raw) return '';
+  if (/^(?:https?:)?\/\//i.test(raw) || raw.startsWith('/')) return raw;
+  return `/preview/${encodeURI(raw)}`;
+}
+
 async function activateDimension(dimensionId) {
   const dim =
     model.dimensionById(state.draft, dimensionId) ||
@@ -295,12 +352,26 @@ async function activateDimension(dimensionId) {
   state.picks = { a: null, b: null, origin: null };
   exitPickMode();
 
-  const size = await loadImageFor(dim);
+  let size = null;
+  let usedTiles = false;
+  if (hasTiles(dim)) {
+    size = await loadTilesFor(dim);
+    usedTiles = Boolean(size);
+    // 瓦片加载失败（manifest 404 / 结构不对 / 老站点没有 tiles.js）→ 回退单张 image
+    if (!usedTiles) size = await loadImageFor(dim);
+  } else {
+    dim.tileMeta = null;
+    canvas?.setTileset?.(null);
+    size = await loadImageFor(dim);
+  }
+
   if (!size) {
     showCanvasEmpty(
-      dim.image
-        ? `找不到基底图「${dim.image}」——把图片放到站点目录，或用右侧「导入本地图片」`
-        : '该维度还没有选择基底图',
+      hasTiles(dim)
+        ? `瓦片清单加载失败：${dim.tiles?.manifest || '（未填写）'}；${dim.image ? `已尝试回退单图「${dim.image}」` : '且该维度没有兜底图'}`
+        : dim.image
+          ? `找不到基底图「${dim.image}」——把图片放到站点目录，或用右侧「导入本地图片」`
+          : '该维度还没有选择基底图',
     );
   } else {
     hideCanvasEmpty();
@@ -310,8 +381,10 @@ async function activateDimension(dimensionId) {
   refreshEditor();
   runValidation();
   updateMeta();
+  updateCanvasInfo(size ? dim : null);
   // 不同维度的图幅可能差很多：切维度后整图适配，避免沿用上一个维度的缩放导致只看到一角
   if (size) canvas?.fitToContent?.({ animate: false });
+  return { size, usedTiles };
 }
 
 async function loadImageFor(dim) {
@@ -341,6 +414,83 @@ async function loadImageFor(dim) {
   return size;
 }
 
+/**
+ * 加载瓦片底图：
+ *   1. 用站点 tiles.js 的 loadTileset() 拉取并校验 manifest；
+ *   2. 世界范围 / 底图尺寸直接来自 manifest（1 像素 = 1 方块）；
+ *   3. 把 Tileset 交给 EditorCanvas 渲染（canvas.setTileset）。
+ * 失败时返回 null，由调用方回退到单张 image（与站点行为一致）。
+ */
+async function loadTilesFor(dim) {
+  const manifest = dim && dim.tiles ? String(dim.tiles.manifest || '').trim() : '';
+  if (!manifest) {
+    dim.tileMeta = { manifest: '', error: '没有填写瓦片清单路径' };
+    return null;
+  }
+  const url = previewStaticUrl(manifest);
+  if (!state.tileModule || typeof state.tileModule.loadTileset !== 'function') {
+    dim.tileMeta = { manifest, url, error: '站点没有可用的 tiles.js（/preview/assets/js/tiles.js），已回退单图' };
+    toast('站点缺少瓦片模块：该维度将回退为单张图片显示', 'warn', 5000);
+    return null;
+  }
+  try {
+    const tileset = await state.tileModule.loadTileset(url);
+    dim.tileMeta = {
+      manifest,
+      url,
+      imageWidth: tileset.imageWidth,
+      imageHeight: tileset.imageHeight,
+      bounds: { ...tileset.bounds },
+      levels: tileset.levels.map((entry) => ({
+        level: entry.level,
+        blocksPerPixel: entry.blocksPerPixel,
+        minX: entry.minX,
+        maxX: entry.maxX,
+        minZ: entry.minZ,
+        maxZ: entry.maxZ,
+      })),
+      source: tileset.source || '',
+      error: null,
+    };
+    dim.imageMeta = { width: tileset.imageWidth, height: tileset.imageHeight, missing: false };
+    ensureCalibrationFromTiles(dim, tileset);
+    if (typeof canvas?.setTileset === 'function') canvas.setTileset(tileset);
+    else console.warn('[tool] EditorCanvas 还没有 setTileset，瓦片底图无法显示');
+    updateCanvasInfo(dim);
+    // 瓦片底图不做「暗图自动提亮」的亮度分析（瓦片是异步拼的），
+    // 但必须给 body[data-enhance] 一个明确值：有偏好就沿用，没有就关掉。
+    applyEnhance(readEnhancePref() === true);
+    return { width: tileset.imageWidth, height: tileset.imageHeight };
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    console.warn(`[tool] 瓦片底图加载失败：${url}`, err);
+    dim.tileMeta = { manifest, url, error: message };
+    toast(`瓦片清单加载失败，已回退单图：${message}`, 'warn', 6000);
+    return null;
+  }
+}
+
+/**
+ * 瓦片维度没有有效画幅时，用 manifest 的世界范围补一份 calibration。
+ * （只影响单图兜底 / 校准面板显示；标记定位本身走 manifest 投影。）
+ */
+function ensureCalibrationFromTiles(dim, tileset) {
+  const cal = dim.calibration || {};
+  const nums = [cal.xMin, cal.xMax, cal.zMin, cal.zMax].map(Number);
+  const valid = nums.every(Number.isFinite) && nums[1] > nums[0] && nums[3] > nums[2];
+  if (valid && cal.calibrated === true) return;
+  const { xMin, xMax, zMin, zMax } = tileset.bounds;
+  dim.calibration = {
+    calibrated: true,
+    xMin,
+    xMax,
+    zMin,
+    zMax,
+    flipZ: false,
+    note: `瓦片底图：世界范围来自 ${tileset.manifestUrl || 'manifest.json'}（1 像素 = 1 方块）`,
+  };
+}
+
 /** 新维度/坏画幅时给一组合理默认值（1 像素 = 1 方块、图片中心 = 世界原点），保证标记可见 */
 function ensureCalibration(dim, size) {
   const cal = dim.calibration || {};
@@ -367,18 +517,32 @@ function syncAppProjection() {
   const dim = currentDimension();
   const meta = (dim && dim.imageMeta) || {};
   state.imageSize = meta.width > 0 && meta.height > 0 ? { width: meta.width, height: meta.height } : null;
-  const cal = (dim && dim.calibration) || null;
-  state.calibration = cal
-    ? {
-        xMin: Number(cal.xMin),
-        xMax: Number(cal.xMax),
-        zMin: Number(cal.zMin),
-        zMax: Number(cal.zMax),
-        flipZ: cal.flipZ === true,
-        calibrated: cal.calibrated === true,
-        note: cal.note || '',
-      }
-    : null;
+  // 瓦片维度：世界范围以 manifest 为准，state.calibration 同步成 manifest 的范围（供网格/读数使用）
+  const tile = dim && dim.tileMeta && !dim.tileMeta.error ? dim.tileMeta : null;
+  if (tile && tile.bounds) {
+    state.calibration = {
+      xMin: Number(tile.bounds.xMin),
+      xMax: Number(tile.bounds.xMax),
+      zMin: Number(tile.bounds.zMin),
+      zMax: Number(tile.bounds.zMax),
+      flipZ: false,
+      calibrated: true,
+      note: '瓦片底图：世界范围来自 manifest',
+    };
+  } else {
+    const cal = (dim && dim.calibration) || null;
+    state.calibration = cal
+      ? {
+          xMin: Number(cal.xMin),
+          xMax: Number(cal.xMax),
+          zMin: Number(cal.zMin),
+          zMax: Number(cal.zMax),
+          flipZ: cal.flipZ === true,
+          calibrated: cal.calibrated === true,
+          note: cal.note || '',
+        }
+      : null;
+  }
   state.projection = projectionFor(dim);
   updatePickPositionButton();
   return state.projection;
@@ -429,8 +593,10 @@ function readEnhancePref() {
 }
 
 function applyEnhance(on) {
-  const img = $('canvas-image');
-  if (img) img.style.filter = on ? ENHANCE_FILTER : 'none';
+  // 底图可能是单图 <img>，也可能是瓦片 <canvas>：两套都套同一个 filter
+  for (const el of document.querySelectorAll('#canvas-image, #canvas-tiles')) {
+    el.style.filter = on ? ENHANCE_FILTER : 'none';
+  }
   document.body.dataset.enhance = on ? '1' : '0';
   state.enhanceOn = on;
   const btn = $('btn-enhance');
@@ -585,7 +751,7 @@ function isTypingTarget(target) {
   return !!target.closest('input, textarea, select, [contenteditable="true"]');
 }
 
-/** 画布左上角信息条：明确告诉用户当前显示的是哪张图、多大 */
+/** 画布左上角信息条：明确告诉用户当前显示的是哪张图 / 哪套瓦片、多大 */
 function updateCanvasInfo(dim) {
   const el = $('canvas-info');
   if (!el) return;
@@ -595,7 +761,15 @@ function updateCanvasInfo(dim) {
     return;
   }
   el.hidden = false;
-  el.textContent = `${dim.name} · ${dim.image} · ${meta.width}×${meta.height}px`;
+  const tile = dim.tileMeta && !dim.tileMeta.error ? dim.tileMeta : null;
+  if (tile) {
+    const levels = Array.isArray(tile.levels) ? tile.levels.length : 0;
+    el.textContent = `${dim.name} · 瓦片 ${tile.manifest} · ${meta.width}×${meta.height}px · ${levels} 层`;
+  } else if (dim.tileMeta && dim.tileMeta.error) {
+    el.textContent = `${dim.name} · 瓦片加载失败，已回退单图 ${dim.image || '（无）'}`;
+  } else {
+    el.textContent = `${dim.name} · ${dim.image} · ${meta.width}×${meta.height}px`;
+  }
 }
 
 function refreshEditor() {
@@ -637,6 +811,10 @@ function handlePatch(patch) {
       break;
     case 'dimension': {
       if (!dim) return;
+      if (patch.field === 'tiles.mode' || patch.field === 'tiles.manifest') {
+        handleTilesPatch(dim, patch);
+        return;
+      }
       if (String(patch.field).startsWith('calibration.')) {
         const key = String(patch.field).slice('calibration.'.length);
         dim.calibration = dim.calibration || {};
@@ -670,9 +848,38 @@ function handlePatch(patch) {
   commit({ structural: false });
 }
 
+/**
+ * 「底图类型 / 瓦片清单」修改：直接改维度字段，然后重新加载底图。
+ * 瓦片加载是异步的，activateDimension 内部自己 await，不阻塞本次点击。
+ */
+function handleTilesPatch(dim, patch) {
+  if (!dim) return;
+  const wasTiles = hasTiles(dim);
+  if (patch.field === 'tiles.mode') {
+    if (patch.value === 'tiles') {
+      dim.tiles = wasTiles ? dim.tiles : { manifest: 'tiles/manifest.json' };
+    } else {
+      dim.tiles = null;
+    }
+  } else {
+    const manifest = String(patch.value == null ? '' : patch.value).trim();
+    dim.tiles = manifest ? { manifest } : null;
+  }
+  const nowTiles = hasTiles(dim);
+  if (!nowTiles) dim.tileMeta = null;
+  commit({ structural: true });
+  activateDimension(dim.id);
+  if (wasTiles !== nowTiles) {
+    toast(
+      nowTiles ? '已切换到瓦片底图，正在读取 manifest…' : '已切换到单图底图（PNG + 画幅校准）',
+      'info',
+      2600,
+    );
+  }
+}
+
 /** 提交一次修改：校验 → 刷新 → 标脏 → 自动保存 */
-function commit({ structural = false } = {}) {
-  state.dirty = true;
+function commit({ structural = false } = {}) {  state.dirty = true;
   runValidation();
   syncAppProjection();
   refreshCanvas();
@@ -1978,6 +2185,13 @@ function api2tool() {
     model,
     api,
     json: () => model.toConfigJson(state.draft),
+    /** 当前瓦片渲染状态（层级 / canvas 位图 / DPR / 缓存），单图模式返回 null */
+    tiles: () => (typeof canvas?.getTileStats === 'function' ? canvas.getTileStats() : null),
+    /** 当前维度的瓦片元信息（manifest / worldBlockRange / 层级 / 错误） */
+    tileMeta: () => {
+      const dim = currentDimension();
+      return dim && dim.tileMeta ? dim.tileMeta : null;
+    },
     validate: () => {
       runValidation();
       return state.validation;

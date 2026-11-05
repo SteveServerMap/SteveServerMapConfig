@@ -917,3 +917,77 @@ test('dimensionById / waypointById：命中与未命中', () => {
   assert.equal(waypointById(dimension, 'nope'), null);
   assert.equal(waypointById(null, 'x'), null);
 });
+
+/* ========================================================================== */
+/* 10. 瓦片底图字段 tiles（站点 schema：object 或 string）                      */
+/* ========================================================================== */
+
+test('normalizeDraft：保留站点 config.json 的 tiles（对象写法）', { skip: !siteConfigAvailable }, () => {
+  const { draft, warnings } = normalizeDraft(readSiteConfig());
+  const overworld = dimensionById(draft, 'overworld');
+  assert.ok(overworld, '应能规范化出 overworld 维度');
+  assert.deepEqual(overworld.tiles, { manifest: 'tiles/manifest.json' });
+  assert.equal(overworld.image, '主世界.png');
+  assert.equal(warnings.length, 0, `真实站点配置不应产生 warning：${JSON.stringify(warnings)}`);
+
+  // 导出后仍带 tiles（不能因为经过工具就退化成单图）
+  const exported = toConfigJson(draft);
+  assert.deepEqual(exported.dimensions[0].tiles, { manifest: 'tiles/manifest.json' });
+  const roundTrip = normalizeDraft(exported).draft;
+  assert.deepEqual(dimensionById(roundTrip, 'overworld').tiles, { manifest: 'tiles/manifest.json' });
+});
+
+test('normalizeDraft：tiles 支持字符串简写，非法值降级为 null 并给 warning', () => {
+  const base = createEmptyDraft();
+  const raw = {
+    ...base,
+    dimensions: [
+      { ...base.dimensions[0], tiles: ' tiles/manifest.json ' },
+      { ...base.dimensions[0], id: 'dim-b', tiles: { manifest: '   ' } },
+      { ...base.dimensions[0], id: 'dim-c', tiles: 42 },
+    ],
+  };
+  const { draft, warnings } = normalizeDraft(raw);
+  assert.deepEqual(draft.dimensions[0].tiles, { manifest: 'tiles/manifest.json' });
+  assert.equal(draft.dimensions[1].tiles, null);
+  assert.equal(draft.dimensions[2].tiles, null);
+  assert.ok(warnings.some((w) => w.includes('tiles')), '非法 tiles 应给出提示');
+});
+
+test('toConfigJson：tiles 在 image 之后、只在配置时输出', () => {
+  const draft = createEmptyDraft();
+  const dim = draft.dimensions[0];
+  dim.image = '主世界.png';
+  dim.tiles = { manifest: 'tiles/manifest.json' };
+  dim.calibration = { calibrated: true, xMin: -10, xMax: 10, zMin: -10, zMax: 10, flipZ: false, note: '' };
+
+  const withTiles = toConfigJson(draft);
+  assert.deepEqual(Object.keys(withTiles.dimensions[0]), [
+    'id', 'name', 'image', 'tiles', 'calibration', 'groups', 'waypoints',
+  ]);
+  assert.deepEqual(withTiles.dimensions[0].tiles, { manifest: 'tiles/manifest.json' });
+
+  const single = toConfigJson({ ...draft, dimensions: [{ ...dim, tiles: null }] });
+  assert.equal('tiles' in single.dimensions[0], false, '单图维度不应输出 tiles 字段');
+});
+
+test('validateDraft：tiles.manifest 为空 → error；瓦片维度不再要求「已校准」', () => {
+  const draft = createEmptyDraft();
+  const dim = draft.dimensions[0];
+  dim.image = '主世界.png';
+  dim.tiles = { manifest: '' };
+  dim.calibration = { calibrated: false, xMin: -10, xMax: 10, zMin: -10, zMax: 10, flipZ: false, note: '' };
+
+  const bad = validateDraft(draft);
+  assert.ok(bad.errors.some((e) => e.path === 'dimensions[0].tiles.manifest' && e.level === 'error'));
+
+  dim.tiles = { manifest: 'tiles/manifest.json' };
+  const ok = validateDraft(draft);
+  assert.equal(ok.errors.filter((e) => e.path.startsWith('dimensions[0].tiles')).length, 0);
+  assert.equal(
+    ok.warnings.filter((w) => w.path === 'dimensions[0].calibration.calibrated').length,
+    0,
+    '瓦片维度不应再提示画幅未校准',
+  );
+});
+

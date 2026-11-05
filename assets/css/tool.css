@@ -2436,16 +2436,27 @@ body.preview-open {
   background-position: 0 0, 12px 12px;
 }
 
-#canvas-image {
+#canvas-image,
+#canvas-tiles {
   background: #050706;
   box-shadow:
     0 0 0 1px rgba(90, 210, 111, 0.3),
     0 18px 60px rgba(0, 0, 0, 0.55);
 }
 
-body[data-enhance="1"] #canvas-image {
+body[data-enhance="1"] #canvas-image,
+body[data-enhance="1"] #canvas-tiles {
   /* filter 由 app.js 内联设置（提亮倍数要能一起调），这里只做兜底 */
   filter: brightness(2.8) saturate(1.15) contrast(1.02);
+}
+
+/* 瓦片底图：<canvas> 与 <img> 共用 .canvas-image 的尺寸/显隐语义（canvas.js 负责 display 切换） */
+.canvas-tiles {
+  max-width: none;
+  max-height: none;
+  user-select: none;
+  pointer-events: none;
+  touch-action: none;
 }
 
 .canvas-info {

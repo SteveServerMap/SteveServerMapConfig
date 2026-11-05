@@ -2,7 +2,7 @@
 /**
  * tests/e2e.mjs —— SteveServerMapConfig 端到端验收（零依赖，一条命令跑完）
  * =============================================================================
- * 覆盖 docs/CONTRACT.md §7 的 8 条验收标准，外加 8 项加固检查（共 16 项）：
+ * 覆盖 docs/CONTRACT.md §7 的 8 条验收标准，外加 10 项加固检查（共 18 项）：
  *   §7.1 server 启动 + GET /api/health 200
  *   §7.2 3 秒内渲染出配置树，无 console error / 未捕获异常 / HTTP≥400
  *   §7.3 树里的路径点数量与站点 config.json 一致（数量动态读取，站点配置由用户随时改）
@@ -442,6 +442,12 @@ function validateSchema(schema, value, where = '$') {
 
 const SITE_ENTRY_FILES = ['index.html', 'config.json', 'config.schema.json'];
 
+/**
+ * 站点里需要整目录复制的资源：瓦片底图（manifest + 各层 PNG）。
+ * 不复制的话，配了 tiles 的维度在副本里一定会 404 → 工具只能回退单图，「瓦片模式」就没法验收。
+ */
+const SITE_ENTRY_DIRS = ['tiles'];
+
 /** 复制站点仓库到 %TEMP%（只复制工具/预览需要的部分，跳过 .git、tests、docs） */
 async function prepareSiteCopy(siteRepo, { verbose = false } = {}) {
   assert(fs.existsSync(siteRepo), `站点仓库不存在：${siteRepo}（用 --site-repo=<路径> 指定）`);
@@ -463,6 +469,18 @@ async function prepareSiteCopy(siteRepo, { verbose = false } = {}) {
     filter: (src) => !/[\\/]\.git[\\/]?$/.test(src),
   });
   copied.push('assets/');
+
+  // 瓦片底图目录（可选）：manifest + tiles/<level>/<x>_<y>.png
+  for (const name of SITE_ENTRY_DIRS) {
+    const src = path.join(siteRepo, name);
+    if (!fs.existsSync(src)) continue;
+    await fsp.cp(src, path.join(dir, name), {
+      recursive: true,
+      force: true,
+      filter: (entry) => !/[\\/]\.git[\\/]?$/.test(entry),
+    });
+    copied.push(`${name}/`);
+  }
 
   // 三张基底图（主世界/下界/末地）以及任何放在站点根目录的图片
   for (const entry of await fsp.readdir(siteRepo, { withFileTypes: true })) {
@@ -651,6 +669,17 @@ async function domFacts(page) {
       toastText: cut(text(S.toast) || '', 200),
       imageLoaded: Boolean(img && img.complete && img.naturalWidth > 0),
       imageNatural: img ? { width: img.naturalWidth, height: img.naturalHeight } : null,
+      // 瓦片底图（维度配了 tiles 时 #canvas-image 会被隐藏，改用 canvas 位图判断「底图载入」）
+      tileStats:
+        typeof tool?.tiles === 'function'
+          ? (() => {
+              try {
+                return tool.tiles();
+              } catch {
+                return null;
+              }
+            })()
+          : null,
       canvasMarkers: document.querySelectorAll(`${S.canvasOverlay} .marker`).length,
       pickPoints: document.querySelectorAll(`${S.canvasOverlay} .pick-crosshair`).length,
       bodyMode: document.body.dataset.mode || '',
@@ -947,36 +976,49 @@ async function readCanvasMode(page) {
 
 /* ------------------------------ 画布坐标 ------------------------------ */
 
-/** 画布上可见区域内的某个相对位置 → 屏幕坐标 + 对应的图片像素 */
+/** 画布上可见区域内的某个相对位置 → 屏幕坐标 + 对应的图片像素（瓦片/单图通用） */
 async function canvasPointAt(page, fx, fy) {
   const info = await page.evalFn((fx, fy, SELJSON) => {
     const S = JSON.parse(SELJSON);
     const img = document.querySelector(S.canvasImage);
+    const tiles = document.getElementById('canvas-tiles');
     const root = document.querySelector(S.canvasRoot);
-    if (!img || !root) return { error: '缺少 #canvas-image 或 #canvas-root' };
-    if (!img.complete || !img.naturalWidth || !img.naturalHeight) {
+    const stats = window.__tool && typeof window.__tool.tiles === 'function' ? window.__tool.tiles() : null;
+    // 当前底图二选一：瓦片激活时 <canvas id="canvas-tiles"> 才是可见的那张
+    const isTile = Boolean(stats && stats.active && tiles && getComputedStyle(tiles).display !== 'none');
+    const target = isTile ? tiles : img;
+    if (!target || !root) return { error: '缺少底图元素（#canvas-image / #canvas-tiles）或 #canvas-root' };
+    if (!isTile && (!img.complete || !img.naturalWidth || !img.naturalHeight)) {
       return { error: `画布图片未载入（naturalWidth=${img.naturalWidth}，complete=${img.complete}）` };
     }
-    const ir = img.getBoundingClientRect();
+    const logicalW = isTile ? Number(stats.imageWidth) : img.naturalWidth;
+    const logicalH = isTile ? Number(stats.imageHeight) : img.naturalHeight;
+    if (!(logicalW > 0) || !(logicalH > 0)) {
+      return { error: `底图逻辑尺寸无效（${isTile ? '瓦片' : '单图'}：${logicalW}×${logicalH}）` };
+    }
+    const ir = target.getBoundingClientRect();
     const rr = root.getBoundingClientRect();
     const left = Math.max(ir.left, rr.left, 0);
     const right = Math.min(ir.right, rr.right, window.innerWidth);
     const top = Math.max(ir.top, rr.top, 0);
     const bottom = Math.min(ir.bottom, rr.bottom, window.innerHeight);
     if (!(right - left > 60) || !(bottom - top > 60)) {
-      return { error: `画布可见区域太小：${Math.round(right - left)}×${Math.round(bottom - top)}` };
+      return {
+        error: `画布可见区域太小：${Math.round(right - left)}×${Math.round(bottom - top)}` +
+          `（底图=${isTile ? 'tiles' : 'image'}，rect=${Math.round(ir.width)}×${Math.round(ir.height)} @ ${Math.round(ir.left)},${Math.round(ir.top)}）`,
+      };
     }
     const cx = left + (right - left) * fx;
     const cy = top + (bottom - top) * fy;
-    const px = (cx - ir.left) * (img.naturalWidth / (ir.width || 1));
-    const py = (cy - ir.top) * (img.naturalHeight / (ir.height || 1));
+    const px = (cx - ir.left) * (logicalW / (ir.width || 1));
+    const py = (cy - ir.top) * (logicalH / (ir.height || 1));
     const hit = document.elementFromPoint(cx, cy);
     return {
       cx,
       cy,
       px,
       py,
-      imageSize: { width: img.naturalWidth, height: img.naturalHeight },
+      imageSize: { width: logicalW, height: logicalH },
       hit: hit ? `${hit.tagName.toLowerCase()}${hit.id ? `#${hit.id}` : ''}` : null,
       hitUid: hit ? String(hit.dataset?.uid || '') : '',
       canvasVisible: { width: Math.round(right - left), height: Math.round(bottom - top) },
@@ -1353,8 +1395,17 @@ async function checkPageRender(ctx) {
   }
 
   const facts = await domFacts(page);
-  assert(facts.imageLoaded, `画布基底图没有载入（#canvas-image naturalWidth=${facts.imageNatural?.width ?? 0}）`);
-  return `重新导航后 ${formatDuration(Date.now() - navStarted)} 内完成首屏；树渲染 ${formatDuration(elapsed)}（< 3000ms）· ${hit.mode} 命中 ${hit.waypoints} 个路径点 · 图片 ${facts.imageNatural.width}×${facts.imageNatural.height} · console error / 异常 / HTTP≥400：0 条`;
+  const tileActive = Boolean(facts.tileStats && facts.tileStats.active && facts.tileStats.imageWidth > 0);
+  assert(
+    tileActive || facts.imageLoaded,
+    tileActive
+      ? '瓦片底图激活但 manifest 尺寸无效'
+      : `画布基底图没有载入（#canvas-image naturalWidth=${facts.imageNatural?.width ?? 0}，且没有激活瓦片底图）`,
+  );
+  const baseNote = tileActive
+    ? `瓦片底图 ${facts.tileStats.imageWidth}×${facts.tileStats.imageHeight}（manifest）`
+    : `图片 ${facts.imageNatural.width}×${facts.imageNatural.height}`;
+  return `重新导航后 ${formatDuration(Date.now() - navStarted)} 内完成首屏；树渲染 ${formatDuration(elapsed)}（< 3000ms）· ${hit.mode} 命中 ${hit.waypoints} 个路径点 · ${baseNote} · console error / 异常 / HTTP≥400：0 条`;
 }
 
 /* ------------------------------ 可见性：基底图真的被画出来了 ------------------------------ */
@@ -1386,20 +1437,42 @@ async function checkCanvasVisible(ctx) {
     .catch(() => {});
   await page.settle(200);
 
+  // 瓦片是异步加载的：等到「至少贴上一张」再断言，否则首帧就是空 canvas。
+  // 这里不 await 失败（单图模式下 tiles() 为 null，直接跳过）。
+  await waitUntil(
+    () =>
+      page.evalFn(() => {
+        const s = window.__tool && typeof window.__tool.tiles === 'function' ? window.__tool.tiles() : null;
+        return Boolean(s && s.active && (Number(s.loaded) > 0 || Number(s.drawn) > 0));
+      }),
+    { timeout: 8000, interval: 120, label: '瓦片底图至少贴上一张' },
+  ).catch(() => {});
+
   const vis = await page.evalFn(() => {
     const img = document.getElementById('canvas-image');
+    const tiles = document.getElementById('canvas-tiles');
     if (!img) return { error: '缺少 #canvas-image' };
-    const cs = getComputedStyle(img);
-    const rect = img.getBoundingClientRect();
+    const stats = window.__tool && typeof window.__tool.tiles === 'function' ? window.__tool.tiles() : null;
+    // 底图二选一：瓦片层激活时看 <canvas id="canvas-tiles">，否则看 <img id="canvas-image">
+    const isTile = Boolean(stats && stats.active && tiles && getComputedStyle(tiles).display !== 'none');
+    const target = isTile ? tiles : img;
+    const cs = getComputedStyle(target);
+    const rect = target.getBoundingClientRect();
     const info = document.getElementById('canvas-info');
     return {
+      isTile,
+      targetTag: target.tagName,
       opacity: cs.opacity,
-      className: img.className,
+      className: target.className,
       visibility: cs.visibility,
       display: cs.display,
       filter: cs.filter,
-      complete: img.complete,
-      natural: [img.naturalWidth, img.naturalHeight],
+      complete: isTile ? true : img.complete,
+      natural: isTile
+        ? [Number(stats.imageWidth) || 0, Number(stats.imageHeight) || 0]
+        : [img.naturalWidth, img.naturalHeight],
+      stats,
+      imageDisplay: getComputedStyle(img).display,
       rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       enhance: document.body.dataset.enhance ?? null,
       infoHidden: info ? info.hidden : null,
@@ -1409,23 +1482,53 @@ async function checkCanvasVisible(ctx) {
   });
   assert(!vis.error, vis.error);
 
-  // ① DOM 层：图片必须真的可见
+  // ① DOM 层：当前底图元素必须真的可见（瓦片模式 = <canvas id="canvas-tiles">）
+  const baseLabel = vis.isTile ? '#canvas-tiles（瓦片底图）' : '#canvas-image（单图底图）';
   assert(
     Number(vis.opacity) === 1,
-    `#canvas-image 的 opacity 实际 ${vis.opacity} vs 期望 1（tool.css 里 .canvas-image 默认 opacity:0，检查 canvas.js 是否给图片加了 is-loaded 类）`,
+    `${baseLabel} 的 opacity 实际 ${vis.opacity} vs 期望 1（tool.css 里 .canvas-image 默认 opacity:0，检查 canvas.js 是否给底图加了 is-loaded 类）`,
   );
   assert(
     /\bis-loaded\b/.test(String(vis.className)),
-    `#canvas-image 缺少 is-loaded 类：class="${vis.className}"（没有它 → opacity 恒为 0 → 地图永远不显示）`,
+    `${baseLabel} 缺少 is-loaded 类：class="${vis.className}"（没有它 → opacity 恒为 0 → 地图永远不显示）`,
   );
   assert(
     vis.visibility === 'visible' && vis.display !== 'none',
-    `#canvas-image 的 visibility/display 实际 ${vis.visibility}/${vis.display} vs 期望 visible/非 none`,
+    `${baseLabel} 的 visibility/display 实际 ${vis.visibility}/${vis.display} vs 期望 visible/非 none`,
   );
-  assert(
-    vis.complete === true && vis.natural[0] > 0 && vis.natural[1] > 0,
-    `#canvas-image 未加载完成：complete=${vis.complete} natural=${vis.natural.join('×')}`,
-  );
+  if (vis.isTile) {
+    // 瓦片模式：canvas 位图必须真有像素（层级 / 位图尺寸 / DPR / 已解码瓦片）
+    const s = vis.stats || {};
+    assert(
+      Number(s.canvasWidth) > 0 && Number(s.canvasHeight) > 0,
+      `瓦片 canvas 位图尺寸 实际 ${s.canvasWidth}×${s.canvasHeight} vs 期望 > 0（层级选择或 _resizeBacking 没跑）`,
+    );
+    assert(
+      Number.isFinite(s.level) && s.level >= 0,
+      `瓦片层级 实际 ${JSON.stringify(s.level)} vs 期望 >= 0（tileset.levelForScale 没生效）`,
+    );
+    assert(
+      Number(s.dpr) >= 1,
+      `瓦片层 dpr 实际 ${JSON.stringify(s.dpr)} vs 期望 >= 1（画布没读到 devicePixelRatio）`,
+    );
+    assert(
+      Number(s.imageWidth) > 0 && Number(s.imageHeight) > 0,
+      `瓦片底图逻辑尺寸 实际 ${s.imageWidth}×${s.imageHeight} vs 期望 > 0（manifest 的 worldBlockRange 没接上）`,
+    );
+    assert(
+      Number(s.loaded) > 0 || Number(s.drawn) > 0,
+      `瓦片一张都没画出来：loaded=${s.loaded} drawn=${s.drawn} level=${s.level}（检查 /preview/tiles/manifest.json 与瓦片 URL）`,
+    );
+    assert(
+      vis.imageDisplay === 'none',
+      `瓦片模式下 #canvas-image 的 display 实际 ${vis.imageDisplay} vs 期望 none（两张底图同时显示会重影）`,
+    );
+  } else {
+    assert(
+      vis.complete === true && vis.natural[0] > 0 && vis.natural[1] > 0,
+      `#canvas-image 未加载完成：complete=${vis.complete} natural=${vis.natural.join('×')}`,
+    );
+  }
   assert(
     vis.rect.width > 50 && vis.rect.height > 50,
     `#canvas-image 渲染尺寸 实际 ${Math.round(vis.rect.width)}×${Math.round(vis.rect.height)} vs 期望 > 50×50（可能被父容器压成 0）`,
@@ -1438,7 +1541,16 @@ async function checkCanvasVisible(ctx) {
     String(vis.infoText || '').includes(sizeText),
     `#canvas-info 文本 实际 "${truncate(vis.infoText, 70)}" 不含 "${sizeText}"`,
   );
-  if (ctx.siteImageName) {
+  if (vis.isTile) {
+    assert(
+      String(vis.infoText || '').includes('瓦片'),
+      `#canvas-info 文本 实际 "${truncate(vis.infoText, 70)}" 不含「瓦片」（瓦片模式应显示 manifest 信息）`,
+    );
+    assert(
+      /\.json/.test(String(vis.infoText || '')),
+      `#canvas-info 文本 实际 "${truncate(vis.infoText, 70)}" 不含 manifest 路径（应显示 tiles/manifest.json）`,
+    );
+  } else if (ctx.siteImageName) {
     assert(
       String(vis.infoText || '').includes(ctx.siteImageName),
       `#canvas-info 文本 实际 "${truncate(vis.infoText, 70)}" 不含图片名 "${ctx.siteImageName}"`,
@@ -1448,8 +1560,12 @@ async function checkCanvasVisible(ctx) {
   // ② 像素层：截图片区域算亮度（这才是「眼睛看到的东西」）
   const clip = await page.evalFn(() => {
     const img = document.getElementById('canvas-image');
-    if (!img) return { error: '缺少 #canvas-image' };
-    const rect = img.getBoundingClientRect();
+    const tiles = document.getElementById('canvas-tiles');
+    const stats = window.__tool && typeof window.__tool.tiles === 'function' ? window.__tool.tiles() : null;
+    const isTile = Boolean(stats && stats.active && tiles && getComputedStyle(tiles).display !== 'none');
+    const target = isTile ? tiles : img;
+    if (!target) return { error: '缺少底图元素（#canvas-image / #canvas-tiles）' };
+    const rect = target.getBoundingClientRect();
     const left = Math.max(0, rect.left);
     const top = Math.max(0, rect.top);
     const right = Math.min(window.innerWidth, rect.right);
@@ -1480,14 +1596,147 @@ async function checkCanvasVisible(ctx) {
   // mean 只用来兜「整块全黑」，不参与判别——因为关掉提亮后暗图本身 mean 也不高。
   assert(
     stats.mean > 8 && stats.litRatio > 0.05,
-    `地图区域像素几乎全黑，图片没有被绘制：mean=${stats.mean.toFixed(1)}（期望 > 8）· litRatio=${stats.litRatio.toFixed(3)}（期望 > 0.05）· ` +
-      `截图 ${stats.width}×${stats.height}（opacity=${vis.opacity}、filter=${vis.filter}、enhance=${vis.enhance}）`,
+    `地图区域像素几乎全黑，底图没有被绘制：mean=${stats.mean.toFixed(1)}（期望 > 8）· litRatio=${stats.litRatio.toFixed(3)}（期望 > 0.05）· ` +
+      `截图 ${stats.width}×${stats.height}（目标=${vis.targetTag}、opacity=${vis.opacity}、filter=${vis.filter}、enhance=${vis.enhance}）`,
   );
 
+  const tileNote = vis.isTile
+    ? `瓦片 level=${vis.stats.level}、canvas ${vis.stats.canvasWidth}×${vis.stats.canvasHeight}、dpr=${vis.stats.dpr}、` +
+      `已贴 ${vis.stats.drawn}/${vis.stats.loaded} 张；`
+    : '';
   return (
-    `opacity=1、is-loaded ✓、${Math.round(vis.rect.width)}×${Math.round(vis.rect.height)}px 显示中；` +
-    `像素统计 mean=${stats.mean.toFixed(1)} / litRatio=${stats.litRatio.toFixed(3)}（阈值 8 / 0.05，截图 ${stats.width}×${stats.height}）；` +
+    `${baseLabel}：opacity=1、is-loaded ✓、${Math.round(vis.rect.width)}×${Math.round(vis.rect.height)}px 显示中；` +
+    `${tileNote}像素统计 mean=${stats.mean.toFixed(1)} / litRatio=${stats.litRatio.toFixed(3)}（阈值 8 / 0.05，截图 ${stats.width}×${stats.height}）；` +
     `#canvas-info="${truncate(vis.infoText, 40)}"；enhance=${vis.enhance ?? '未判定'}、画布标记 ${vis.markers} 个`
+  );
+}
+
+/* ------------------------------ 瓦片底图模式（tiles 维度） ------------------------------ */
+
+/**
+ * 瓦片底图回归：
+ *   ① 维度表单里有「底图类型 = 瓦片」+ manifest 输入，摘要有世界范围；
+ *   ② #canvas-tiles 可见、#canvas-image 隐藏，TileLayer 真的贴出了瓦片；
+ *   ③ 放大后自动切到更细的层级（level 变细 / canvas 位图变大）；
+ *   ④ 切到单图维度再切回来，两种底图能正确互切（不重影、不残留）；
+ *   ⑤ 导出 JSON 仍带 tiles 字段（工具不会把瓦片维度退化成单图）。
+ */
+async function checkTilesMode(ctx) {
+  const page = ctx.page;
+
+  // 站点里哪个维度配了瓦片、哪个是纯单图？从草稿里动态找（站点没配瓦片时本项直接跳过）
+  const target = await page.evalFn(() => {
+    const draft = window.__tool?.draft?.();
+    const dims = draft?.dimensions || [];
+    const hit = dims.find((d) => d && d.tiles && String(d.tiles.manifest || '').trim());
+    if (!hit) return null;
+    const single = dims.find(
+      (d) => d && d.id !== hit.id && (!d.tiles || !String(d.tiles.manifest || '').trim()),
+    );
+    return { id: hit.id, name: hit.name, manifest: hit.tiles.manifest, singleId: single ? single.id : null };
+  });
+
+  if (!target) return '站点没有配置瓦片底图，本项跳过';
+
+  // 确保当前就在瓦片维度，并等第一张瓦片贴上去
+  await page.evalFn((id) => window.__tool?.activateDimension?.(id), target.id);
+  await waitUntil(
+    () =>
+      page.evalFn(() => {
+        const s = window.__tool?.tiles?.();
+        return Boolean(s && s.active && s.imageWidth > 0 && (Number(s.loaded) > 0 || Number(s.drawn) > 0));
+      }),
+    { timeout: 8000, interval: 120, label: `瓦片维度「${target.name}」渲染完成` },
+  );
+
+  const facts = await page.evalFn(() => {
+    const tiles = document.getElementById('canvas-tiles');
+    const img = document.getElementById('canvas-image');
+    const s = window.__tool?.tiles?.();
+    const rect = tiles ? tiles.getBoundingClientRect() : null;
+    const modeEl = document.querySelector('#form [data-field="tiles.mode"]');
+    const manifestEl = document.querySelector('#form [data-field="tiles.manifest"]');
+    const summaryEl = document.querySelector('#form [data-tiles-summary]');
+    return {
+      stats: s,
+      tileVisible: Boolean(tiles && getComputedStyle(tiles).display !== 'none' && rect && rect.width > 50),
+      imageDisplay: img ? getComputedStyle(img).display : null,
+      modeValue: modeEl ? modeEl.value : null,
+      manifestValue: manifestEl ? manifestEl.value : null,
+      summaryText: summaryEl ? (summaryEl.textContent || '').trim() : '',
+    };
+  });
+
+  assert(facts.modeValue === 'tiles', `「底图类型」实际 ${JSON.stringify(facts.modeValue)} vs 期望 'tiles'`);
+  assert(
+    String(facts.manifestValue || '').includes(target.manifest),
+    `「瓦片清单」实际 ${JSON.stringify(facts.manifestValue)} vs 期望含 ${target.manifest}`,
+  );
+  assert(/世界范围/.test(facts.summaryText), `瓦片摘要缺少世界范围：${truncate(facts.summaryText, 160)}`);
+  assert(facts.tileVisible, '#canvas-tiles 不可见（display 或尺寸不对）');
+  assert(facts.imageDisplay === 'none', `瓦片模式下 #canvas-image display 实际 ${facts.imageDisplay} vs 期望 none`);
+
+  // 放大 → 层级应该更细（level 更小 / canvas 位图更大）
+  const fitStats = facts.stats;
+  await page.evalFn(() => window.__tool?.canvas?.zoomBy?.(8));
+  await page.settle(350);
+  const zoomed = await page.evalFn(() => window.__tool?.tiles?.());
+  assert(zoomed && zoomed.active, '放大后瓦片层不再激活');
+  assert(
+    zoomed.level <= fitStats.level || zoomed.canvasWidth >= fitStats.canvasWidth,
+    `放大后瓦片层级没有变细：整图 level=${fitStats.level}/canvasW=${fitStats.canvasWidth} → ` +
+      `放大后 level=${zoomed.level}/canvasW=${zoomed.canvasWidth}`,
+  );
+  assert(
+    Number(zoomed.dpr) >= 1,
+    `瓦片层 dpr 实际 ${JSON.stringify(zoomed.dpr)} vs 期望 >= 1`,
+  );
+
+  // 切到单图维度再切回来：互切不能重影 / 残留
+  if (target.singleId) {
+    await page.evalFn((id) => window.__tool?.activateDimension?.(id), target.singleId);
+    await page.settle(450);
+    const single = await page.evalFn(() => {
+      const tiles = document.getElementById('canvas-tiles');
+      const img = document.getElementById('canvas-image');
+      return {
+        tilesActive: Boolean(window.__tool?.tiles?.()?.active),
+        tileDisplay: tiles ? getComputedStyle(tiles).display : null,
+        imageDisplay: img ? getComputedStyle(img).display : null,
+        imageLoaded: Boolean(img && img.complete && img.naturalWidth > 0),
+      };
+    });
+    assert(!single.tilesActive, '切到单图维度后瓦片层仍然激活');
+    assert(single.tileDisplay === 'none', `单图维度下 #canvas-tiles display 实际 ${single.tileDisplay} vs 期望 none`);
+    assert(
+      single.imageDisplay !== 'none' && single.imageLoaded,
+      `单图维度下 #canvas-image 没显示：display=${single.imageDisplay} loaded=${single.imageLoaded}`,
+    );
+
+    await page.evalFn((id) => window.__tool?.activateDimension?.(id), target.id);
+    await page.settle(450);
+    const back = await page.evalFn(() => window.__tool?.tiles?.());
+    assert(back && back.active, '切回瓦片维度后瓦片层没有恢复');
+  }
+
+  // 导出 JSON 必须保留 tiles（做过工具不等于丢掉瓦片配置）
+  const exported = await page.evalFn((id) => {
+    const json = window.__tool?.json?.();
+    const dim = (json?.dimensions || []).find((d) => d && d.id === id);
+    return dim ? dim.tiles || null : null;
+  }, target.id);
+  assert(
+    exported && exported.manifest === target.manifest,
+    `导出 JSON 的 tiles 实际 ${JSON.stringify(exported)} vs 期望 { manifest: "${target.manifest}" }（瓦片维度被退化成单图）`,
+  );
+
+  // 复位整图适配，避免影响后续检查
+  await page.evalFn(() => window.__tool?.canvas?.fitToContent?.({ animate: false }));
+  await page.settle(250);
+
+  return (
+    `维度「${target.name}」：level ${fitStats.level}→${zoomed.level}（放大 8×）、canvasW ${fitStats.canvasWidth}→${zoomed.canvasWidth}、` +
+    `dpr=${fitStats.dpr}；表单/摘要/单图互切/导出 tiles 全部正确`
   );
 }
 
@@ -1721,8 +1970,11 @@ async function checkCalibration(ctx) {
   );
 
   const facts = await domFacts(page);
-  assert(facts.imageLoaded, `画布图片未载入，无法校准（naturalWidth=${facts.imageNatural?.width ?? 0}）`);
-  const imageSize = facts.imageNatural;
+  const tileActive = Boolean(facts.tileStats && facts.tileStats.active && facts.tileStats.imageWidth > 0);
+  assert(
+    tileActive || facts.imageLoaded,
+    `画布底图未载入，无法校准（#canvas-image naturalWidth=${facts.imageNatural?.width ?? 0}，瓦片=${tileActive ? '激活' : '未激活'}）`,
+  );
 
   // 选到主世界维度
   const dimSel = await selectDimension(ctx, 'overworld', '主世界');
@@ -1730,6 +1982,8 @@ async function checkCalibration(ctx) {
 
   const pointA = await canvasPointAt(page, 0.2, 0.22);
   const pointB = await canvasPointAt(page, 0.8, 0.78);
+  // 以「当前底图的逻辑尺寸」为准（瓦片维度是 manifest 的 1 像素 = 1 方块，和单图 PNG 分辨率不同）
+  const imageSize = pointA.imageSize || facts.imageNatural;
   assert(
     Math.abs(pointA.px - pointB.px) > imageSize.width * 0.2 && Math.abs(pointA.py - pointB.py) > imageSize.height * 0.2,
     `两个测试点太近（像素 ${Math.round(pointA.px)},${Math.round(pointA.py)} / ${Math.round(pointB.px)},${Math.round(pointB.py)}），反解会不稳`,
@@ -2043,8 +2297,14 @@ async function checkNewWaypoint(ctx) {
   const page = ctx.page;
   const before = await readCurrentConfig(ctx);
   const beforeIds = new Set(waypointsOf(before.config).map((w) => String(w.id)));
-  const imageSize = (await domFacts(page)).imageNatural;
-  assert(imageSize && imageSize.width > 0, '画布图片未载入，无法在画布上放路径点');
+  // 当前底图逻辑尺寸：瓦片维度用 manifest 尺寸（1 像素 = 1 方块），单图维度用 naturalWidth/Height
+  const imageSize = await page.evalFn(() => {
+    const s = window.__tool?.tiles?.();
+    if (s && s.active && Number(s.imageWidth) > 0) return { width: Number(s.imageWidth), height: Number(s.imageHeight) };
+    const img = document.getElementById('canvas-image');
+    return img && img.naturalWidth ? { width: img.naturalWidth, height: img.naturalHeight } : null;
+  });
+  assert(imageSize && imageSize.width > 0, '画布底图未载入，无法在画布上放路径点');
 
   // 先把画布放大到 1 图片像素 ≈ 1 屏幕像素：否则拖动 1 屏幕像素 = 好几个方块，误差压不到 2 方块内
   const zoom = await ensureZoomAtLeast(ctx, 1.8);
@@ -2074,7 +2334,7 @@ async function checkNewWaypoint(ctx) {
     `当前维度的画幅不可用（xMin=${JSON.stringify(cal.xMin)} zMin=${JSON.stringify(cal.zMin)}），无法换算点击位置`,
   );
   const target = await canvasPointAt(page, 0.42, 0.38);
-  const wantWorld = worldFromPixel(cal, imageSize, target.px, target.py);
+  const wantWorld = worldFromPixel(cal, target.imageSize || imageSize, target.px, target.py);
 
   const readWp = async () => {
     const { config } = await readCurrentConfig(ctx);
@@ -2334,7 +2594,6 @@ async function checkPlaceMode(ctx) {
 
   const beforeCount = waypointsOf((await readCurrentConfig(ctx)).config).length;
   const beforeIds = new Set(waypointsOf((await readCurrentConfig(ctx)).config).map((w) => String(w.id)));
-  const imageSize = (await domFacts(page)).imageNatural;
 
   // ---------- ① 新建路径点：应停在 select，且「在图上取点」可用 ----------
   const howNew = await clickAction(ctx, {
@@ -2385,7 +2644,7 @@ async function checkPlaceMode(ctx) {
 
   const cal = dim.calibration || {};
   const target = await canvasPointAt(page, 0.72, 0.28);
-  const want = worldFromPixel(cal, imageSize, target.px, target.py);
+  const want = worldFromPixel(cal, target.imageSize, target.px, target.py);
   await page.click(target.cx, target.cy);
   await page.settle(260);
 
@@ -3120,6 +3379,7 @@ const CHECKS = [
   { id: 'c0-visible', label: '扩展：基底图真的被绘制出来（opacity/is-loaded + 像素亮度 + #canvas-info）', requires: ['page'], run: checkCanvasVisible },
   { id: 'c0b-enhance', label: '扩展：提亮按钮一次点击只翻转一次（data-enhance / filter / localStorage）', requires: ['page'], run: checkEnhanceToggle },
   { id: 'c3-tree-count', label: '§7.3 树里的路径点数量 = 站点 config.json 主世界点数（动态读取）', requires: ['page'], run: checkTreeCount },
+  { id: 'c0c-tiles', label: '扩展：瓦片底图模式（表单/渲染/层级切换/单图互切/导出保留 tiles）', requires: ['page'], run: checkTilesMode },
   { id: 'x1-undo-redo', label: '扩展：撤销 / 重做（Ctrl+Z / Ctrl+Shift+Z）', requires: ['page'], run: checkUndoRedo },
   { id: 'c4-calibration', label: '§7.4 两点校准解算误差 < 2 方块（并落盘）', requires: ['page'], run: checkCalibration, setsFlag: 'calibrated' },
   { id: 'c5a-new-waypoint', label: '§7.5a 新增路径点 → 画布交互 → 坐标出现在表单', requires: ['page'], run: checkNewWaypoint, setsFlag: 'waypointAdded' },
@@ -3335,7 +3595,14 @@ async function preflight(ctx) {
   const page = await Page.open(cdp, { url: 'about:blank' });
   ctx.page = page;
   await page.setViewport(VIEWPORT);
-  ctx.diagnostics = createDiagnostics(page);
+  // 瓦片缺失（未探索区域不导出瓦片）是正常情况：/preview/tiles/tiles/<level>/<x>_<y>.png 的 404 一律放行。
+  // manifest 本身的 404 仍然算错误 —— 那说明路径填错了或副本没带 tiles/。
+  ctx.diagnostics = createDiagnostics(page, {
+    ignore: (error) => {
+      const where = String(error?.where || '');
+      return /\/preview\/tiles\/tiles\/[^/]+\/[^/]+\.png(?:[?#].*)?$/.test(where);
+    },
+  });
   // window.confirm（「读取站点配置」「删除路径点」都会弹）在无头模式下会卡住页面，统一自动接受
   page.on('Page.javascriptDialogOpening', () => {
     page.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {});

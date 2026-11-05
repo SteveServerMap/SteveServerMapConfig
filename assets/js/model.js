@@ -5,6 +5,8 @@
  *
  *   草稿 = 站点 config.json 的超集
  *     · 站点字段全部保留（version / site / defaultDimension / ui / dimensions）
+ *     · 维度字段 `tiles`（瓦片底图清单）也是站点字段，草稿里统一规范化成
+ *       `{ manifest: string } | null`；导出时原样写回（没有则整个字段省略）
  *     · 每个维度多一个工具专用字段 imageMeta（图片原始像素尺寸 / 是否缺图）
  *     · 导出时由 toConfigJson() 剥掉 imageMeta，并去掉空值字段
  *
@@ -25,6 +27,7 @@
  *     ui: { labelMode, grid, startCollapsed, showCoords },
  *     dimensions: [{
  *       id, name, image,
+ *       tiles: { manifest: 'tiles/manifest.json' } | null,   // 瓦片底图（站点 schema：object 或 string）
  *       calibration: { calibrated, xMin, xMax, zMin, zMax, flipZ, note },
  *       groups: [{ id, name, color, visible }],
  *       waypoints: [{ id, name, x, y, z, group, icon, color, label, description, url }],
@@ -163,6 +166,42 @@ function toBool(value) {
 }
 
 /**
+ * 从维度的 `tiles` 值里取出 manifest 路径（站点 schema 允许 `"tiles/manifest.json"`
+ * 简写，也允许 `{ manifest: "tiles/manifest.json" }`）。
+ *
+ * @param {any} tiles
+ * @returns {string|null} trim 后的 manifest；拿不到（空 / 非法 / 缺 manifest）返回 null
+ */
+function tilesManifestOf(tiles) {
+  if (typeof tiles === 'string') return str(tiles) || null;
+  if (isObject(tiles)) return str(tiles.manifest) || null;
+  return null;
+}
+
+/**
+ * 规范化维度的瓦片配置。站点 schema 允许 `"tiles": { "manifest": "…" }`，
+ * 也允许直接写字符串；草稿统一存成 `{ manifest }` 或 null（单图模式）。
+ *
+ * @param {any} rawTiles
+ * @param {string[]} warnings
+ * @param {string} dimensionName
+ * @returns {{manifest: string}|null}
+ */
+function normalizeTiles(rawTiles, warnings, dimensionName) {
+  if (rawTiles === undefined || rawTiles === null) return null;
+  if (typeof rawTiles !== 'string' && !isObject(rawTiles)) {
+    warnings.push(`维度「${dimensionName}」的 tiles 不是对象或字符串，已忽略`);
+    return null;
+  }
+  const manifest = tilesManifestOf(rawTiles);
+  if (!manifest) {
+    warnings.push(`维度「${dimensionName}」的 tiles 缺少 manifest，已按单图模式处理`);
+    return null;
+  }
+  return { manifest };
+}
+
+/**
  * 把名字变成 id 片段：小写、保留中文与字母数字，其它字符变 `-`。
  * 与站点 config.js 的 slugify 保持一致（中文 id 在站点里是合法的）。
  */
@@ -244,6 +283,8 @@ export function createEmptyDraft() {
         id: 'overworld',
         name: '主世界',
         image: '',
+        // 瓦片底图：null = 未配置（单张 image + calibration 模式）
+        tiles: null,
         calibration: emptyCalibration(),
         groups: [makeDefaultGroup()],
         waypoints: [],
@@ -399,11 +440,13 @@ function normalizeDimension(rawDimension, index, warnings) {
   const name = str(rawDimension.name) || `维度 ${index + 1}`;
   const id = str(rawDimension.id) || slugify(name) || `dim-${index + 1}`;
   const image = str(rawDimension.image);
+  // 瓦片底图：{ manifest } 或直接字符串都接受；拿不到有效 manifest 时为 null（= 单图模式）
+  const tiles = normalizeTiles(rawDimension.tiles, warnings, name);
   if (!image) {
     warnings.push(`维度「${name}」缺少 image（基底图文件名），站点会显示「地图还没上传」`);
   }
 
-  const calibration = normalizeCalibration(rawDimension.calibration, warnings, name);
+  const calibration = normalizeCalibration(rawDimension.calibration, warnings, name, Boolean(tiles));
   const groups = normalizeGroups(rawDimension.groups, warnings, name);
   const groupIds = new Set(groups.map((group) => group.id));
   const waypoints = normalizeWaypoints(rawDimension.waypoints, groups, groupIds, warnings, name);
@@ -414,10 +457,12 @@ function normalizeDimension(rawDimension, index, warnings) {
     groupIds.add(DEFAULT_GROUP.id);
   }
 
+  // 字段顺序固定（便于 diff / 快照比较）：tiles 为 null 时也保留该键
   return {
     id,
     name,
     image,
+    tiles,
     calibration,
     groups,
     waypoints,
@@ -433,12 +478,15 @@ function normalizeDimension(rawDimension, index, warnings) {
  * @param {any} raw
  * @param {string[]} warnings
  * @param {string} dimensionName
+ * @param {boolean} [hasTiles] 配置了瓦片底图时，画幅由 manifest 决定，缺 calibration 不再告警
  * @returns {object}
  */
-function normalizeCalibration(raw, warnings, dimensionName) {
+function normalizeCalibration(raw, warnings, dimensionName, hasTiles = false) {
   const calibration = emptyCalibration();
   if (!isObject(raw)) {
-    warnings.push(`维度「${dimensionName}」没有 calibration，路径点将无法定位（请在工具里校准画幅）`);
+    if (!hasTiles) {
+      warnings.push(`维度「${dimensionName}」没有 calibration，路径点将无法定位（请在工具里校准画幅）`);
+    }
     return calibration;
   }
 
@@ -628,7 +676,8 @@ function normalizeImageMeta(raw) {
  *   - 剥掉工具专用字段 `imageMeta` 以及所有未知字段；
  *   - 字段顺序固定，便于 git diff：
  *     根：version, site, defaultDimension, ui, dimensions[]
- *     维度：id, name, image, calibration, groups, waypoints
+ *     维度：id, name, image, [tiles], calibration, groups, waypoints
+ *   - `tiles` 只在配置了 manifest 时输出（`{ manifest }`），否则整个字段省略；
  *   - 空值不输出：`y: null`、`color`、`url`、`description`、`label` 为空时省略；
  *   - `group` 引用了不存在的分组时回落到 `default`（站点也会这么做）；
  *   - 不在本函数里做缩进 —— 调用方用 `JSON.stringify(cfg, null, 2) + '\n'`。
@@ -656,14 +705,18 @@ export function toConfigJson(draft) {
       ? rawDimension.waypoints.filter(isObject).map((waypoint) => toConfigWaypoint(waypoint, groupIds))
       : [];
 
-    dimensions.push({
+    const tilesManifest = tilesManifestOf(rawDimension.tiles);
+    const outputDimension = {
       id,
       name: str(rawDimension.name),
       image: str(rawDimension.image),
-      calibration: toConfigCalibration(rawDimension.calibration),
-      groups,
-      waypoints,
-    });
+    };
+    // 维度字段顺序：id, name, image, [tiles], calibration, groups, waypoints
+    if (tilesManifest) outputDimension.tiles = { manifest: tilesManifest };
+    outputDimension.calibration = toConfigCalibration(rawDimension.calibration);
+    outputDimension.groups = groups;
+    outputDimension.waypoints = waypoints;
+    dimensions.push(outputDimension);
   }
 
   const site = isObject(source.site) ? source.site : {};
@@ -841,6 +894,16 @@ export function validateDraft(draft, ctx) {
         warn(`${base}.image`, `站点目录里没有「${image}」，站点会显示「地图还没上传」`);
       }
 
+      /* ---- tiles（瓦片底图，可选） ---- */
+      const tilesManifest = tilesManifestOf(dimension.tiles);
+      const hasTiles = Boolean(tilesManifest);
+      if (dimension.tiles !== undefined && dimension.tiles !== null && !hasTiles) {
+        error(`${base}.tiles.manifest`, '瓦片清单路径不能为空（要用单图请把「底图类型」切回单图）');
+      }
+      if (hasTiles && !/\.json$/i.test(tilesManifest)) {
+        warn(`${base}.tiles.manifest`, `瓦片清单通常应以 .json 结尾：${tilesManifest}`);
+      }
+
       /* ---- calibration ---- */
       validateCalibration(
         dimension.calibration,
@@ -849,6 +912,7 @@ export function validateDraft(draft, ctx) {
         imageSizeOf,
         error,
         warn,
+        hasTiles,
       );
 
       /* ---- groups ---- */
@@ -956,10 +1020,12 @@ export function validateDraft(draft, ctx) {
  * @param {Function|null} imageSizeOf
  * @param {(path: string, message: string) => void} error
  * @param {(path: string, message: string) => void} warn
+ * @param {boolean} [hasTiles] 维度配了瓦片底图：世界范围来自 manifest，画幅只作单图兜底，问题降级为 warning
  */
-function validateCalibration(calibration, path, dimension, imageSizeOf, error, warn) {
+function validateCalibration(calibration, path, dimension, imageSizeOf, error, warn, hasTiles = false) {
+  const report = hasTiles ? warn : error;
   if (!isObject(calibration)) {
-    error(path, '缺少画幅校准（calibration），路径点无法定位');
+    report(path, '缺少画幅校准（calibration），路径点无法定位');
     return;
   }
 
@@ -969,8 +1035,8 @@ function validateCalibration(calibration, path, dimension, imageSizeOf, error, w
   const hasSomeBounds = bounds.some((value) => value !== null);
 
   if (hasAllBounds) {
-    if (!(xMax > xMin)) error(`${path}.xMax`, `画幅倒置：xMax（${xMax}）必须大于 xMin（${xMin}）`);
-    if (!(zMax > zMin)) error(`${path}.zMax`, `画幅倒置：zMax（${zMax}）必须大于 zMin（${zMin}）`);
+    if (!(xMax > xMin)) report(`${path}.xMax`, `画幅倒置：xMax（${xMax}）必须大于 xMin（${xMin}）`);
+    if (!(zMax > zMin)) report(`${path}.zMax`, `画幅倒置：zMax（${zMax}）必须大于 zMin（${zMin}）`);
 
     // 附加检查：X / Z 两个方向的「方块/像素」应基本一致，否则路径点会被拉伸
     if (imageSizeOf) {
@@ -1003,7 +1069,7 @@ function validateCalibration(calibration, path, dimension, imageSizeOf, error, w
       }
     }
   } else if (hasSomeBounds) {
-    error(path, '画幅四边界不完整（xMin / xMax / zMin / zMax 都要是数字）');
+    report(path, '画幅四边界不完整（xMin / xMax / zMin / zMax 都要是数字）');
   } else {
     const pixelsPerBlock = num(calibration.pixelsPerBlock);
     const originX = num(calibration.originX);
@@ -1013,11 +1079,12 @@ function validateCalibration(calibration, path, dimension, imageSizeOf, error, w
     if (hasScale) {
       warn(path, '使用了 pixelsPerBlock + originX/originZ 的替代写法（站点支持），推荐改成四边界写法');
     } else {
-      error(path, '还没有校准画幅（需要 xMin / xMax / zMin / zMax）');
+      report(path, '还没有校准画幅（需要 xMin / xMax / zMin / zMax）');
     }
   }
 
-  if (calibration.calibrated !== true) {
+  // 瓦片底图的世界范围来自 manifest，画幅只当单图兜底，不再要求「已校准」标记
+  if (calibration.calibrated !== true && !hasTiles) {
     warn(`${path}.calibrated`, '画幅还没有标记为「已校准」，确认无误后请完成一次校准');
   }
 }
@@ -1162,6 +1229,7 @@ export function createDimension(draft, partial = {}) {
     id: nextId(draft.dimensions, str(prefs.id) || 'dimension'),
     name,
     image: str(prefs.image),
+    tiles: normalizeTiles(prefs.tiles, [], name),
     calibration: emptyCalibration(),
     groups: [makeDefaultGroup()],
     waypoints: [],

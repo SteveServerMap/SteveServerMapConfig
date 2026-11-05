@@ -8,7 +8,33 @@
 - CDP 库：复用 `D:\Project\Github\SteveServerMap.github.io\tests\headless.mjs`（用 `file://` 绝对路径 import，不复制粘贴）
 - 运行产物：`tests/artifacts/`（`.gitignore` 掉除 `.gitignore` 以外的一切）
 
-当前状态：**16 项检查全部通过，退出码 0**（§7 的 8 条 + §7.5 拆成 3 条 + 8 项加固/回归，其中含「基底图真的被画出来」的可见性回归）。
+当前状态：**18 项检查全部通过，退出码 0**（§7 的 8 条 + §7.5 拆成 3 条 + 10 项加固/回归，
+其中含「基底图真的被画出来」的可见性回归与 2026-11-06 新增的瓦片底图回归）。
+
+## 瓦片底图 + DPR + 缩放插值（2026-11-06）
+
+站点主世界已改用瓦片底图，工具这边补齐了「看得见 + 摆得动 + 保存不丢」：
+
+- **模型**：`model.js` 规范化 / 导出 / 校验维度字段 `tiles`（`{manifest}` 或字符串）；
+  瓦片维度不再要求「已校准」（世界范围来自 manifest，calibration 只作单图兜底）。
+  单测 `node --test tests/model.test.mjs` → **33 通过 / 0 失败**（新增 4 条 tiles 用例）。
+- **画布**：`canvas.js` 新增 `<canvas id="canvas-tiles">` 子图层 + `setTileset()/setDpr()/getTileStats()`；
+  层级选择 / 视口裁剪 / LRU 缓存直接复用站点 `assets/js/tiles.js`（经 `/preview/` 静态导入），
+  不复制瓦片数学。瓦片重绘用 rAF 合并，切单图/切瓦片时同步 `display` 与 `is-loaded`。
+- **DPR / 平滑**：站点 `Tileset.levelForScale(scale, dpr)` 与 `TileLayer({ dpr })` 为向后兼容扩展
+  （默认 dpr=1，站点行为不变）；工具传 `devicePixelRatio`，让 1 瓦片像素 ≈ 1 设备像素；
+  单图 `scale>=1` 用 `image-rendering: pixelated`，缩小时平滑。
+- **接线**：`app.js` 动态加载 `/preview/assets/js/tiles.js` → `loadTileset()` → 写 `dim.tileMeta` →
+  `canvas.setTileset()`；投影走 manifest 的 `worldBlockRange`；manifest 失败自动回退单图并 toast。
+  维度表单新增「底图类型 = 单图/瓦片」「瓦片清单」与瓦片摘要（世界范围 / 尺寸 / 层级）。
+- **e2e 基建**：临时站点副本改为连 `tiles/` 目录一起复制；`createDiagnostics` 放行
+  `/preview/tiles/tiles/**/*.png` 的 404（未导出瓦片属正常），manifest 的 404 仍算错误；
+  「基底图可见性」检查支持两种底图（canvas 位图 / img）。
+- **新增检查 `c0c-tiles`**：表单值 `tiles` + manifest、摘要含世界范围、`#canvas-tiles` 可见且
+  `#canvas-image` 隐藏、瓦片真的贴出、放大 8× 后层级由 3 → 0（canvas 512 → 4096）、
+  切到单图维度再切回瓦片维度正确互切、导出 JSON 仍保留 `tiles`。
+- **结果**：`node tests/e2e.mjs` → **18 通过 / 0 失败 / 0 跳过**（≈26 s，实测 25.8 s）。
+  实测 `c0-visible`：瓦片 level=3、canvas 512×640、dpr=1（无头）、已贴 6/6 张、像素 mean=21.8 / litRatio=0.185。
 
 ---
 
@@ -71,14 +97,15 @@ node tests/e2e.mjs
 
 ---
 
-## 3. 检查项清单（共 16 项）
+## 3. 检查项清单（共 18 项）
 
 | id | 对应条款 | 断言什么 |
 | --- | --- | --- |
 | `x3-schema-selftest` | 扩展 | 自制 JSON Schema 校验器**确实能拒绝坏配置**（否则 §7.5 的 schema 断言是假阳性） |
 | `c1-health` | §7.1 | `GET /api/health` → 200 且 `ok:true`、`version`/`uptime` 合法；`siteDir`/`dataDir` 指向临时目录 |
 | `c2-page` | §7.2 | **重新导航**后 3 秒内渲染出配置树；console error / 未捕获异常 / HTTP≥400 共 0 条；基底图载入成功 |
-| `c0-visible` | 扩展（可见性回归） | 基底图**真的被画出来**：computed `opacity===1`、class 含 `is-loaded`、尺寸 >50×50、截图亮度 `mean>8` 且 `litRatio>0.05`、`#canvas-info` 含 `W×H` 与图片名 |
+| `c0-visible` | 扩展（可见性回归） | 基底图**真的被画出来**（单图看 `#canvas-image`，瓦片看 `#canvas-tiles`）：computed `opacity===1`、class 含 `is-loaded`、尺寸 >50×50、截图亮度 `mean>8` 且 `litRatio>0.05`、`#canvas-info` 含 `W×H`；瓦片还断言层级/位图尺寸/dpr/已贴张数，且 `#canvas-image` 已隐藏 |
+| `c0c-tiles` | 扩展（瓦片底图） | 维度表单「底图类型 = 瓦片」+ manifest、摘要含世界范围；`#canvas-tiles` 可见、瓦片真的贴出；放大 8× 层级由粗变细（3→0、canvas 512→4096）；切单图维度再切回瓦片维度正确互切；导出 JSON 仍保留 `tiles` |
 | `c0b-enhance` | 扩展 | 点一次 `#btn-enhance` 只翻转一次（`body[data-enhance]` / `aria-pressed` / `#canvas-image` filter / `localStorage['ssm.enhance.v1']` 同步、再点回原状、不重复绑定） |
 | `c3-tree-count` | §7.3 | `#tree` 里 `[data-waypoint-id]` 数量 = 站点 `config.json` 主世界路径点数（**从副本动态读取**，站点配置由用户随时改） |
 | `x1-undo-redo` | 扩展 | 改路径点名称 → `Ctrl+Z` 复原 → `Ctrl+Shift+Z` 再改回（每步读草稿实测） |

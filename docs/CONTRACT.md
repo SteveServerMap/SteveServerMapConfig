@@ -12,7 +12,7 @@ server.mjs                 零依赖本地服务器（Lead）：静态托管 + �
 index.html                 工具页面骨架（Lead，其他人不要改）
 assets/css/tool.css        style-dev
 assets/js/app.js           装配层：状态/撤销/保存/预览刷新（Lead）
-assets/js/canvas.js        编辑画布：平移缩放 + 标记拖拽 + 拾取（canvas-dev）
+assets/js/canvas.js        编辑画布：平移缩放 + 标记拖拽 + 拾取 + 瓦片底图/DPR（canvas-dev）
 assets/js/editor.js        左侧树 + 属性表单 + 工具栏（editor-dev）
 assets/js/model.js         草稿模型 / 规范化 / 校验 / 导出（model-dev）
 tests/model.test.mjs       model 单元测试（model-dev）
@@ -54,6 +54,7 @@ node server.mjs --port=5300 --site="D:/Project/Github/SteveServerMap.github.io"
       "id": "overworld",
       "name": "主世界",
       "image": "主世界.png",
+      "tiles": { "manifest": "tiles/manifest.json" },   // 可选：瓦片底图（也接受字符串写法）
       "calibration": {
         "calibrated": true,
         "xMin": -1792, "xMax": 1792, "zMin": -2560, "zMax": 2560,
@@ -66,7 +67,14 @@ node server.mjs --port=5300 --site="D:/Project/Github/SteveServerMap.github.io"
           "group": "base", "icon": "spawn", "color": null, "label": "always",
           "description": "…", "url": null }
       ],
-      "imageMeta": { "width": 3584, "height": 5120, "missing": false }   // 仅工具用
+      "imageMeta": { "width": 3584, "height": 5120, "missing": false },  // 仅工具用，导出时剥掉
+      "tileMeta": {                                                     // 仅工具用，导出时剥掉
+        "manifest": "tiles/manifest.json",
+        "imageWidth": 4096, "imageHeight": 5120,
+        "bounds": { "xMin": -2048, "xMax": 2048, "zMin": -3584, "zMax": 1536 },
+        "levels": [{ "level": 0, "blocksPerPixel": 1 }],
+        "error": null
+      }
     }
   ]
 }
@@ -102,13 +110,17 @@ export function waypointById(dimension, id)
 
 校验规则（严重度）：
 - `dimensions` 至少 1 个、`id/name/image` 非空、维度 `id` 唯一 → error
+- `tiles`（可选）：`manifest` 非空字符串 → 否则 error；不以 `.json` 结尾 → warning
 - `calibration` 四边界有限且 `xMax>xMin`、`zMax>zMin`；`calibrated !== true` → warning（提示去校准）
+  - **瓦片维度例外**：世界范围来自 manifest，`calibration` 只作单图兜底，因此「缺校准 / 画幅不合法 /
+    未标记已校准」全部降级为 warning（瓦片维度无需手动画幅校准即可保存）
 - 路径点：`id` 在维度内唯一、`name` 非空、`x`/`z` 有限 → error；`group` 不存在 → warning 并回落到 `default` 分组
 - 分组：`id` 唯一、`color` 形如 `#rrggbb` → error；空分组 → warning
 - `image` 不在 `ctx.imageNames` → warning（缺图，站点会显示「地图还没上传」）
 
 序列化要求（`toConfigJson`）：
-- 字段顺序固定（便于 diff）：`version, site, defaultDimension, ui, dimensions[]`；维度内 `id, name, image, calibration, groups, waypoints`
+- 字段顺序固定（便于 diff）：`version, site, defaultDimension, ui, dimensions[]`；
+  维度内 `id, name, image, [tiles], calibration, groups, waypoints`（`tiles` 只在配置了 manifest 时输出 `{ manifest }`）
 - `y` 为 `null` 时**不输出**该字段；`color/url/description/label` 为空/null 时不输出
 - 输出 JSON 用 2 空格缩进 + 结尾换行（`JSON.stringify(cfg, null, 2) + '\n'`）
 - 必须能通过站点 `config.schema.json` 校验
@@ -128,7 +140,10 @@ export class EditorCanvas {
     onHover(world | null),
   })
 
-  setImage({ src, width, height })       // width/height = 图片原始像素
+  setImage({ src, width, height })       // width/height = 图片原始像素；顺带停用瓦片层
+  setTileset(tileset | null)             // 瓦片底图：站点 tiles.js 的 Tileset；null = 停用（切回单图）
+  setDpr(dpr?)                           // 设备像素比（默认读 devicePixelRatio）；影响瓦片层级选择与插值判定
+  getTileStats()                         // TileLayer.stats + dpr/tileset 尺寸；单图模式返回 null
   setProjection(projection)              // 站点 coords.js createProjection 的返回对象
   setData({ waypoints, groups, projection })
   setSelection(waypointId | null)
@@ -149,6 +164,15 @@ export class EditorCanvas {
 交互要求：滚轮以光标为锚点缩放、拖拽平移、双击放大、`+`/`-`/方向键、触摸捏合；
 标记拖拽（无 lib，Pointer Events，移动超过 3px 才算拖拽，松手回调世界坐标）；
 `pick` 模式下点击不触发拖拽、不选中标记；空数据/无图片时安全不抛错。
+
+**底图二选一（2026-11-06 新增瓦片）**
+- 单图：`<img id="canvas-image">`（`.canvas-image` 靠 `is-loaded` 淡入）；
+- 瓦片：`<canvas id="canvas-tiles" class="canvas-image canvas-tiles">`（由 canvas.js 创建的子图层，
+  与 `#canvas-image` 共用 stage 的 transform 与逻辑尺寸；同一时刻只显示一个，另一个 `display:none`）；
+- 瓦片层的层级选择 / 视口裁剪 / LRU 缓存全部复用站点 `assets/js/tiles.js`（`/preview/` 静态导入）：
+  1 瓦片像素 ≈ 1 **设备**像素（`levelForScale(scale, dpr)`），放大时关插值、缩小时平滑；
+- 单图缩放插值：`scale >= 1` → `image-rendering: pixelated`（锐利），`< 1` → `auto`（平滑）；
+- 视图变化统一走 `_commit()`，瓦片重绘用 rAF 合并（回调里现场 `getViewState()`，不复用旧状态）。
 
 ---
 
@@ -178,6 +202,14 @@ export class EditorPanel {
 `index.html` 中已存在的节点（编辑器填充这些）：
 `#tree`（维度/分组/路径点树）、`#form`（选中项属性表单）、`#toolbar`、`#status`、`#issues`、
 `#btn-*` 系列按钮、`#draft-meta`、`#search`、`#dimension-tabs`。
+
+**维度表单的「底图类型」**（2026-11-06 新增，e2e 稳定选择器）：
+- `#form [data-field="tiles.mode"]`：`<select>`，值 `image` | `tiles`（`dim.tiles` 为真即 `tiles`）；
+- `#form [data-field="tiles.manifest"]`：瓦片清单路径输入框（单图模式下隐藏）；
+- `#form [data-tiles-summary]`：瓦片摘要（世界范围 / 底图尺寸 / 层级数 / manifest / 错误）；
+- patch 约定：`{ kind:'dimension', id, field:'tiles.mode'|'tiles.manifest', value }`，
+  app 收到后改 `dim.tiles` 并重新 `activateDimension()`（异步加载 manifest，失败回退单图）；
+- 编辑器**只读** `dim.tileMeta`（app 注入），不得写回草稿，也不得导出到 config.json。
 
 ---
 
@@ -274,6 +306,7 @@ window.__tool = {
   calibrate(a, b),                      // {px,py,x,z} 两点反解并应用
   json(), validate(), select(), patch(),
   activateDimension(), undo(), redo(), setCalibration(), toast(),
+  tiles(), tileMeta(),                  // 瓦片渲染状态 / 当前维度 manifest 元信息（单图模式为 null）
 }
 ```
 
@@ -292,6 +325,23 @@ window.__tool = {
 - 调试接口：`window.__tool.setOrigin({ px, py, pxPerBlock, flipZ })` 走同一套数学。
 - 注意：`canvas.imageToScreen()` / `worldToScreen()` 返回的是**画布容器内坐标**（不是页面 client 坐标），
   CDP/自动化里要自己加上 `#canvas-root` 的 `getBoundingClientRect()` 偏移。
+
+### 8.8 瓦片底图（2026-11-06）
+站点侧已有瓦片渲染（站点 `assets/js/tiles.js` + `tiles/manifest.json`），工具复用同一套模块，
+**不复制任何瓦片数学**：
+- manifest 路径：站点相对路径（如 `tiles/manifest.json`），工具通过 `/preview/<path>` 读取；
+  也接受已带 `/preview/` 或 `http(s)://` 的绝对地址；
+- 加载流程：`app.js` 动态 `import('/preview/assets/js/tiles.js')` → `loadTileset(url)` →
+  写 `dim.tileMeta` / `dim.imageMeta` → `canvas.setTileset(tileset)` → `syncAppProjection()`；
+- 投影：瓦片维度用 manifest 的 `worldBlockRange`（1 像素 = 1 方块），`calibration` 只作单图兜底；
+  瓦片维度没有有效 calibration 时，`ensureCalibrationFromTiles()` 会按 manifest 自动补一份；
+- 失败回退：manifest 404 / 结构非法 / 老站点没有 tiles.js → 记 `dim.tileMeta.error`，显示单图并 toast；
+- DPR：`levelForScale(scale, dpr)` 让 1 瓦片像素 ≈ 1 设备像素（高分屏选更细的层级），
+  插值判定也按设备像素（`screenDevicePxPerCanvasPx`）；DPR **不参与** canvas 位图尺寸，
+  `MAX_CANVAS_PIXELS` 上限不变；
+- 平滑：单图 `scale>=1` → `pixelated`；瓦片放大 → 关 `imageSmoothingEnabled`，缩小 → 平滑；
+- e2e：`prepareSiteCopy()` 会复制站点 `tiles/` 目录；缺失瓦片的 404 在 `createDiagnostics` 里放行
+  （`/preview/tiles/tiles/**/*.png`），manifest 的 404 仍然算错误。
 
 ## 10. 交互体检修正（2026-11-05）
 

@@ -33,6 +33,7 @@
  */
 
 import { createProjection } from '/preview/assets/js/coords.js';
+import { TileLayer } from '/preview/assets/js/tiles.js';
 
 /* -------------------------------------------------------------------------- */
 /* 常量                                                                        */
@@ -207,7 +208,20 @@ export class EditorCanvas {
     this._gridEl = null;
     this._pickLayer = null;
 
+    // ---- 瓦片底图（可选；用 <canvas id="canvas-tiles"> 替代 <img> 作为底图） ----
+    /** @type {HTMLCanvasElement|null} */
+    this._tileCanvas = null;
+    /** @type {TileLayer|null} */
+    this._tileLayer = null;
+    /** @type {object|null} 站点 tiles.js 的 Tileset 实例 */
+    this._tileset = null;
+    /** 设备像素比：>1 时瓦片层会选更细的层级 / 按设备像素判定插值 */
+    this._dpr = Math.max(1, (typeof window !== 'undefined' && Number(window.devicePixelRatio)) || 1);
+    this._tileRaf = 0;
+    this._lastImageRendering = '';
+
     // ---- 初始化 ----
+    this._ensureTileCanvas();
     this._applyBaseStyle();
     this._bind();
     this.setMode('select');
@@ -224,6 +238,30 @@ export class EditorCanvas {
   /* ====================================================================== */
   /* 初始化 / 清理                                                          */
   /* ====================================================================== */
+
+  /**
+   * 创建 / 复用瓦片底图 canvas（子图层，和 _gridEl / _pickLayer 同类，不算顶层 DOM）。
+   * 初始隐藏：单图模式只显示 #canvas-image；切到瓦片模式时再显示。
+   * @returns {HTMLCanvasElement|null}
+   */
+  _ensureTileCanvas() {
+    if (this._tileCanvas) return this._tileCanvas;
+    const stage = this.stage;
+    if (!stage) return null;
+    let canvas = stage.querySelector('#canvas-tiles');
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.id = 'canvas-tiles';
+      canvas.className = 'canvas-image canvas-tiles';
+      canvas.setAttribute('aria-hidden', 'true');
+      if (this.imageEl && this.imageEl.parentNode === stage) this.imageEl.after(canvas);
+      else stage.appendChild(canvas);
+    }
+    canvas.hidden = true;
+    canvas.style.display = 'none';
+    this._tileCanvas = canvas;
+    return canvas;
+  }
 
   /**
    * 与「变换语义」强相关的兜底内联样式。
@@ -266,6 +304,16 @@ export class EditorCanvas {
       it.pointerEvents = 'none';       // 底图不吃事件，拖拽统一由容器处理
       this.imageEl.draggable = false;
       this.imageEl.alt = '';
+    }
+
+    if (this._tileCanvas) {
+      const ct = this._tileCanvas.style;
+      ct.maxWidth = 'none';
+      ct.maxHeight = 'none';
+      // display 交给 setTileset / _deactivateTiles 管（单图模式下必须保持 none，别在这里写 block）
+      ct.userSelect = 'none';
+      ct.pointerEvents = 'none';
+      ct.touchAction = 'none';
     }
 
     if (this.overlay) {
@@ -363,6 +411,17 @@ export class EditorCanvas {
       this._pickLayer.remove();
       this._pickLayer = null;
     }
+    // 瓦片层：取消排队中的 rAF + 销毁 TileLayer（会清缓存/取消瓦片请求）+ 移除 canvas
+    this._cancelTileDraw();
+    if (this._tileLayer) {
+      this._tileLayer.destroy();
+      this._tileLayer = null;
+    }
+    if (this._tileCanvas) {
+      this._tileCanvas.remove();
+      this._tileCanvas = null;
+    }
+    this._tileset = null;
 
     this._waypoints = [];
     this._byId.clear();
@@ -384,13 +443,26 @@ export class EditorCanvas {
       this.stage.style.transform =
         `translate3d(${n4(this.tx)}px, ${n4(this.ty)}px, 0) scale(${n4(this.scale)})`;
     }
+    this._applyImageRendering();
     if (this.zoomLevelEl) {
       const pct = `${Math.round(this.scale * 100)}%`;
       if (this.zoomLevelEl.textContent !== pct) this.zoomLevelEl.textContent = pct;
     }
   }
 
-  /** 视图状态变化后的统一出口：写 stage → 重排覆盖层 → 通知外部 */
+  /**
+   * 单图插值策略：放大（scale >= 1）时保持像素锐利，缩小时用浏览器平滑插值。
+   * 只在档位变化时写样式，避免每帧写 style。
+   */
+  _applyImageRendering() {
+    if (!this.imageEl) return;
+    const next = this.scale >= 1 ? 'pixelated' : 'auto';
+    if (next === this._lastImageRendering) return;
+    this._lastImageRendering = next;
+    this.imageEl.style.imageRendering = next;
+  }
+
+  /** 视图状态变化后的统一出口：写 stage → 重排覆盖层 → 通知外部 → 重绘瓦片 */
   _commit(state) {
     const nextScale = this._resolveScale(state && state.scale, this.scale);
     const tx = Number(state && state.tx);
@@ -401,6 +473,8 @@ export class EditorCanvas {
     this._applyTransform();
     this._layoutOverlay();
     this._emit();
+    // 瓦片层按最新视图补画（rAF 合并，一帧最多一次；回调里现场取 getViewState）
+    this._scheduleTileDraw();
   }
 
   /** 同步通知外部（onViewChange 每帧一次） */
@@ -687,6 +761,12 @@ export class EditorCanvas {
     const { src, width, height } = image || {};
     this._loadToken += 1;
     const token = this._loadToken;
+    // 切回单图模式：隐藏瓦片 canvas、停掉瓦片层，显示 #canvas-image
+    this._deactivateTiles();
+    if (this.imageEl) {
+      this.imageEl.hidden = false;
+      this.imageEl.style.display = 'block';
+    }
 
     if (!src || typeof src !== 'string') {
       this._clearImage();
@@ -790,6 +870,11 @@ export class EditorCanvas {
       this.imageEl.style.maxWidth = 'none';
       this.imageEl.style.maxHeight = 'none';
     }
+    // 瓦片 canvas 与 <img> 共用同一套逻辑尺寸（同一个 stage transform），切模式时无需重排
+    if (this._tileCanvas) {
+      this._tileCanvas.style.width = `${w}px`;
+      this._tileCanvas.style.height = `${h}px`;
+    }
     // 之前因为不知道图片尺寸而没建成的投影，现在可以补建
     if (this._pendingProjection && !this._projection) {
       this._projection = this._coerceProjection(this._pendingProjection);
@@ -800,6 +885,7 @@ export class EditorCanvas {
   /** 清空底图（保留容器与覆盖层，不销毁实例） */
   _clearImage() {
     this._imageSize = null;
+    this._deactivateTiles();
     if (this.imageEl) {
       this.imageEl.removeAttribute('src');
       this.imageEl.style.width = '0px';
@@ -811,6 +897,117 @@ export class EditorCanvas {
     }
     this._showEmpty(true, '还没有地图图片');
     this._commit({ scale: 1, tx: 0, ty: 0 });
+  }
+
+  /* ---------------------------- 瓦片底图（可选） ---------------------------- */
+
+  /**
+   * 切换到瓦片底图。app.js 解析完 manifest 后调用；传 null 表示停用瓦片层。
+   * 不碰 _projection / _pendingProjection —— app 会在之后 setProjection。
+   * @param {object|null} tileset 站点 tiles.js 的 Tileset 实例
+   * @returns {boolean} 是否成功进入瓦片模式
+   */
+  setTileset(tileset) {
+    const w = tileset && Number(tileset.imageWidth);
+    const h = tileset && Number(tileset.imageHeight);
+    if (!tileset || !isNum(w) || !isNum(h) || w <= 0 || h <= 0) {
+      this._deactivateTiles();
+      return false;
+    }
+    const canvas = this._ensureTileCanvas();
+    if (!canvas) {
+      console.warn('[EditorCanvas] setTileset：找不到 #canvas-stage，无法创建瓦片画布');
+      return false;
+    }
+
+    this._tileset = tileset;
+    if (!this._tileLayer) {
+      this._tileLayer = new TileLayer(canvas, { tileset, dpr: this._dpr });
+    } else {
+      // 复用实例：换一份 tileset，避免把已解码瓦片缓存整批丢掉
+      this._tileLayer.setTileset(tileset);
+      this._tileLayer.setDpr(this._dpr);
+    }
+    this._tileLayer.setActive(true);
+
+    canvas.hidden = false;
+    canvas.style.display = 'block';
+    // tool.css 的 .canvas-image 默认 opacity:0，靠 is-loaded 淡入（瓦片是异步贴的，先直接显示）
+    canvas.classList.add('is-loaded');
+    this._imageSize = { width: w, height: h };
+    this._setImageSize(w, h);
+    if (this.imageEl) {
+      this.imageEl.hidden = true;
+      this.imageEl.style.display = 'none';
+    }
+    this._layoutOverlay();
+    this._scheduleTileDraw();
+    return true;
+  }
+
+  /** 停用瓦片层并隐藏瓦片 canvas（切回单图 / 清空底图时调用） */
+  _deactivateTiles() {
+    this._cancelTileDraw();
+    if (this._tileLayer) this._tileLayer.setActive(false);
+    if (this._tileCanvas) {
+      this._tileCanvas.hidden = true;
+      this._tileCanvas.style.display = 'none';
+      this._tileCanvas.classList.remove('is-loaded');
+    }
+    this._tileset = null;
+  }
+
+  /**
+   * 设置设备像素比（默认读 window.devicePixelRatio）。
+   * 瓦片层据此选更细的层级 / 按设备像素决定插值，高分屏不会发虚。
+   * @param {number} [dpr]
+   * @returns {number} 生效后的 dpr
+   */
+  setDpr(dpr) {
+    const raw = Number(dpr);
+    const fallback = typeof window !== 'undefined' && Number(window.devicePixelRatio);
+    const next = Math.max(1, isNum(raw) && raw > 0 ? raw : isNum(fallback) && fallback > 0 ? fallback : 1);
+    if (next === this._dpr) return this._dpr;
+    this._dpr = next;
+    if (this._tileLayer) this._tileLayer.setDpr(next);
+    this._scheduleTileDraw();
+    return this._dpr;
+  }
+
+  /** 瓦片渲染状态快照（单图模式返回 null），供调试 / e2e 断言 */
+  getTileStats() {
+    if (!this._tileLayer) return null;
+    const stats = this._tileLayer.stats || {};
+    const tileset = this._tileset;
+    return {
+      ...stats,
+      dpr: this._dpr,
+      hasTileset: Boolean(tileset),
+      imageWidth: tileset ? tileset.imageWidth : 0,
+      imageHeight: tileset ? tileset.imageHeight : 0,
+      bounds: tileset ? { ...tileset.bounds } : null,
+    };
+  }
+
+  /** 合并同一帧内的多次瓦片重绘请求（滚轮 / 拖拽一次手势只画一帧） */
+  _scheduleTileDraw() {
+    if (this._destroyed || !this._tileLayer || !this._tileset || this._tileRaf) return;
+    const raf = typeof requestAnimationFrame === 'function'
+      ? requestAnimationFrame
+      : (fn) => setTimeout(fn, 16);
+    this._tileRaf = raf(() => {
+      this._tileRaf = 0;
+      if (this._destroyed || !this._tileLayer || !this._tileset) return;
+      // 现场取视图状态：rAF 期间视图可能又变了，不能沿用 _emit 时捕获的旧对象
+      this._tileLayer.update(this.getViewState());
+    });
+  }
+
+  _cancelTileDraw() {
+    if (!this._tileRaf) return;
+    const caf = typeof cancelAnimationFrame === 'function' ? cancelAnimationFrame : clearTimeout;
+    caf(this._tileRaf);
+    this._tileRaf = 0;
   }
 
   /** 空状态提示：只控制显隐与 placeholder 文案，不覆盖 app 写好的自定义文案 */
@@ -1932,6 +2129,8 @@ export class EditorCanvas {
   /** 容器尺寸变化：保持「容器中心对应的图片点」不动，视觉上不跳 */
   _onResize() {
     if (this._destroyed) return;
+    // 窗口可能被拖到不同 DPR 的显示器：重新读设备像素比（瓦片层级 / 插值跟着变）
+    this.setDpr();
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
     if (!(w > 0) || !(h > 0)) return;
@@ -1952,6 +2151,7 @@ export class EditorCanvas {
     this._applyTransform();
     this._layoutOverlay();
     this._emit();
+    this._scheduleTileDraw();
   }
 }
 

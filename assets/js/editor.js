@@ -38,6 +38,13 @@ const MODE_TEXT = {
   place: '放置模式 · 点击画布放置路径点',
   pick: '拾取模式 · 依次点击两个已知地标',
 };
+/** 维度「画幅校准」区块的说明：瓦片模式下 calibration 只用于单图兜底（app.js 会按类型原地替换）。 */
+const CAL_HINT_SINGLE = '世界坐标映射到图片像素的边界；改动画幅后请重新校准。';
+const CAL_HINT_TILES = '瓦片底图的世界范围来自 manifest；下面的 calibration 只用于瓦片加载失败时的单图兜底。';
+const TILES_MODE_OPTIONS = [
+  ['image', '单图（PNG + 画幅校准）'],
+  ['tiles', '瓦片（manifest 清单）'],
+];
 const TONE_SET = new Set(['info', 'ok', 'warn', 'error']);
 
 /** model.js 缺席时的图标兜底表（与站点 markers.js 的 ICONS 一致）。 */
@@ -608,6 +615,13 @@ export class EditorPanel {
     const patch = { kind, field, value };
     if (form.dataset.entityId != null && form.dataset.entityId !== '') patch.id = form.dataset.entityId;
     this._emit('onChange', patch);
+
+    // 切换「底图类型」会改变表单结构（瓦片清单 / 瓦片摘要）。app 的 refresh() 在输入框仍有焦点时
+    // 只把表单标记为 stale、不会重建 DOM（见 _isFormFocused），所以这里就地显示/隐藏瓦片相关行，
+    // 保证下拉一改用户马上看到「瓦片清单」。焦点离开后由 _onFormFocusOut 走正常重建。
+    if (field === 'tiles.mode' && target.tagName === 'SELECT' && form.contains(target)) {
+      this._applyTilesModeView(str(target.value) === 'tiles');
+    }
   }
 
   _onFormClick(event) {
@@ -747,6 +761,9 @@ export class EditorPanel {
     this._renderStatus();
     if (this._isFormFocused()) {
       this._formStale = true;
+      // app 在 manifest 加载完后会写 dim.tileMeta 再 refresh()；此时用户多半正停在表单里输入，
+      // 整个表单不能重建（会吞掉焦点/光标），但「瓦片底图」摘要必须马上反映最新 tileMeta。
+      this._refreshTilesSummaryInPlace();
       return;
     }
     this._formStale = false;
@@ -955,7 +972,8 @@ export class EditorPanel {
       button.dataset.dimensionId = id;
       button.setAttribute('role', 'tab');
       button.setAttribute('aria-selected', isActive ? 'true' : 'false');
-      button.title = `${str(dim.name, id)} · ${(dim.waypoints || []).length} 个路径点`;
+      // 瓦片维度在标签 title 里标一下（不改 DOM 结构，避免影响样式与既有选择器）
+      button.title = `${str(dim.name, id)} · ${(dim.waypoints || []).length} 个路径点${dim.tiles ? ' · 瓦片底图' : ''}`;
       if (isActive) button.classList.add('is-active');
 
       button.appendChild(el('span', 'dim-tab-name', str(dim.name, id)));
@@ -1818,6 +1836,130 @@ export class EditorPanel {
     return options;
   }
 
+  /* ------------------------------ 底图类型（单图 / 瓦片） ------------------------------ */
+
+  /** 维度是否处于瓦片模式。app.js 的约定：`dim.tiles` 为真即瓦片（下拉 value = dim.tiles ? 'tiles' : 'image'）。 */
+  _isTilesDimension(dim) {
+    return Boolean(dim && dim.tiles);
+  }
+
+  /** dim.tiles 由 model.js 规范化成 `{ manifest }`；这里同时兼容手写字符串。 */
+  _tilesManifestOf(dim) {
+    const tiles = dim && dim.tiles;
+    if (!tiles) return '';
+    if (typeof tiles === 'string') return tiles.trim();
+    if (typeof tiles === 'object') return str(tiles.manifest).trim();
+    return '';
+  }
+
+  /**
+   * 「瓦片底图」摘要：dim.tileMeta 是 **工具专用** 数据（app.js 在 manifest 加载后写入，
+   * 不导出、不进草稿文件）。这里只读不写。
+   */
+  _tilesSection(dim) {
+    const manifest = this._tilesManifestOf(dim);
+    const meta = dim && dim.tileMeta && typeof dim.tileMeta === 'object' ? dim.tileMeta : null;
+    const section = this._section('瓦片底图', '信息来自 manifest（工具专用，不会写入 config.json）。');
+    section.dataset.tilesOnly = '1';
+    section.dataset.tilesSummary = '1';
+
+    if (!manifest) {
+      section.appendChild(el('p', 'form-hint', '还没有填写瓦片清单：填好上面的路径后 app 会自动读取并解析 manifest。'));
+      return section;
+    }
+    if (!meta) {
+      section.appendChild(el('p', 'form-hint', `正在读取 ${manifest} …（若一直停在这里，检查路径是否指向站点目录里的 manifest.json）`));
+      return section;
+    }
+    if (meta.error) {
+      section.appendChild(el('p', 'form-hint form-warn', `manifest 解析失败：${str(meta.error)}`));
+      return section;
+    }
+
+    const bounds = meta.bounds && typeof meta.bounds === 'object' ? meta.bounds : null;
+    if (bounds) {
+      section.appendChild(el(
+        'p',
+        'form-hint',
+        `世界范围 X[${fmtBlock(bounds.xMin)}, ${fmtBlock(bounds.xMax)}] · Z[${fmtBlock(bounds.zMin)}, ${fmtBlock(bounds.zMax)}]`,
+      ));
+    }
+    if (Number.isFinite(Number(meta.imageWidth)) && Number.isFinite(Number(meta.imageHeight))) {
+      section.appendChild(el(
+        'p',
+        'form-hint',
+        `底图 ${fmtBlock(Number(meta.imageWidth))} × ${fmtBlock(Number(meta.imageHeight))} px（1 像素 = 1 方块）`,
+      ));
+    }
+
+    const levels = Array.isArray(meta.levels) ? meta.levels : [];
+    if (levels.length) {
+      const detail = levels.map((entry) => {
+        const levelName = entry && entry.level != null ? `L${str(entry.level)}` : 'L?';
+        const bpp = entry && Number.isFinite(Number(entry.blocksPerPixel)) ? Number(entry.blocksPerPixel) : null;
+        return bpp == null ? levelName : `${levelName} ${bpp} 方块/像素`;
+      }).join(' · ');
+      section.appendChild(el('p', 'form-hint', `层级数 ${levels.length}（${detail}）`));
+    }
+
+    const shownManifest = str(meta.manifest) || manifest;
+    section.appendChild(el('p', 'form-hint', `manifest：${shownManifest}`));
+    if (str(meta.source)) section.appendChild(el('p', 'form-hint', `来源：${str(meta.source)}`));
+    return section;
+  }
+
+  /** 就地切换「瓦片相关行」的可见性 + 画幅校准说明（不重建表单、不动数据）。 */
+  _applyTilesModeView(isTiles) {
+    const form = this.el.form;
+    if (!form) return;
+    const on = Boolean(isTiles);
+    for (const node of form.querySelectorAll('[data-tiles-only]')) {
+      node.hidden = !on;
+      // CSS 可能给 .form-row/.form-section 设了 display，hidden 属性会被覆盖，这里再兜一层。
+      if (on) node.style.removeProperty('display');
+      else node.style.display = 'none';
+    }
+    const calHint = form.querySelector('[data-tiles-cal]');
+    if (calHint) {
+      const next = on ? calHint.dataset.hintTiles : calHint.dataset.hintSingle;
+      if (next && calHint.textContent !== next) calHint.textContent = next;
+    }
+  }
+
+  /** 表单有焦点时的增量刷新：只替换「瓦片底图」摘要 + 同步可见性，不打断输入。 */
+  _refreshTilesSummaryInPlace() {
+    const form = this.el.form;
+    if (!form || form.dataset.kind !== 'dimension') return;
+    const ctx = this._selectionContext();
+    if (ctx.kind !== 'dimension') return;
+    const dim = ctx.dim;
+    const active = document.activeElement;
+    // 用户正在瓦片区块里输入（比如把 manifest 清空又重打）时不要把他脚下的行藏掉，
+    // 等焦点离开、表单重建时再按草稿切换类型。
+    const inTilesBlock = Boolean(active && typeof active.closest === 'function' && active.closest('[data-tiles-only]'));
+    if (!inTilesBlock) {
+      const isTiles = this._isTilesDimension(dim);
+      this._applyTilesModeView(isTiles);
+      // 下拉没被聚焦时与草稿对齐（app 切类型时会自动补默认 manifest / 清空 tiles）
+      const modeSelect = form.querySelector('[data-field="tiles.mode"]');
+      if (modeSelect && active !== modeSelect) {
+        const wanted = isTiles ? 'tiles' : 'image';
+        if (modeSelect.value !== wanted) modeSelect.value = wanted;
+      }
+      // manifest 输入框没被聚焦时也补上 app 写的值（例：切到瓦片模式时自动填了默认路径）
+      const input = form.querySelector('[data-field="tiles.manifest"]');
+      if (input && active !== input) {
+        const wanted = this._tilesManifestOf(dim);
+        if (input.value !== wanted) input.value = wanted;
+      }
+    }
+    const current = form.querySelector('[data-tiles-summary]');
+    if (!current) return;
+    const next = this._tilesSection(dim);
+    // 只在内容真的变了才换节点：用户每敲一个字 app 都会 refresh，这里避免无谓的 DOM 抖动。
+    if (current.textContent !== next.textContent) current.replaceWith(next);
+  }
+
   _renderDimensionForm(form, ctx) {
     form.dataset.kind = 'dimension';
     form.dataset.entityId = str(ctx.dim.id);
@@ -1825,6 +1967,7 @@ export class EditorPanel {
 
     const dim = ctx.dim;
     const calibration = dim.calibration && typeof dim.calibration === 'object' ? dim.calibration : {};
+    const isTiles = this._isTilesDimension(dim);
 
     form.appendChild(this._row(
       '名称',
@@ -1844,14 +1987,68 @@ export class EditorPanel {
     importBtn.dataset.importImage = '1';
     importBtn.title = '选择本地图片并写入站点目录';
     imageWrap.append(imageSelect, importBtn);
-    form.appendChild(this._row('图片', imageWrap, '站点目录里的地图文件；不在列表中的名字保存后站点会显示「地图还没上传」。'));
+    form.appendChild(this._row(
+      '图片',
+      imageWrap,
+      isTiles
+        ? '瓦片模式下「图片」只作为 manifest 加载失败时的兜底底图；单图模式直接显示该 PNG。'
+        : '站点目录里的地图文件；不在列表中的名字保存后站点会显示「地图还没上传」。',
+    ));
+
+    // 底图类型：单图（PNG + 画幅校准）/ 瓦片（manifest）——app.js 按 `tiles.mode` 处理
+    form.appendChild(this._row(
+      '底图类型',
+      makeSelect({
+        key: 'dim-tiles-mode',
+        field: 'tiles.mode',
+        value: isTiles ? 'tiles' : 'image',
+        options: TILES_MODE_OPTIONS,
+      }),
+      '瓦片模式按 manifest 的 worldBlockRange 定位，不再需要手动画幅校准。',
+    ));
+
+    // 瓦片清单：只读 manifest 路径，app.js 会通过 /preview/ 拉取并解析。
+    // 单图模式下隐藏但保留在 DOM 里，切换类型时可就地显示（见 _applyTilesModeView）。
+    const manifestRow = this._row(
+      '瓦片清单',
+      makeInput({
+        key: 'dim-tiles-manifest',
+        field: 'tiles.manifest',
+        value: this._tilesManifestOf(dim),
+        placeholder: 'tiles/manifest.json',
+        mono: true,
+      }),
+      '相对站点根目录的 manifest 路径（例如 tiles/manifest.json）；工具通过 /preview/ 读取。',
+    );
+    manifestRow.dataset.tilesOnly = '1';
+    form.appendChild(manifestRow);
+
+    // 瓦片摘要：dim.tileMeta 由 app.js 加载 manifest 后写入（工具专用，不导出）
+    const tilesSection = this._tilesSection(dim);
+    form.appendChild(tilesSection);
+
+    // 单图模式下先隐藏瓦片相关行（切换类型时由 _applyTilesModeView 就地显示）
+    if (!isTiles) {
+      for (const node of [manifestRow, tilesSection]) {
+        node.hidden = true;
+        node.style.display = 'none';
+      }
+    }
 
     const meta = dim.imageMeta && typeof dim.imageMeta === 'object' ? dim.imageMeta : null;
     if (meta && Number.isFinite(meta.width) && Number.isFinite(meta.height)) {
       form.appendChild(el('p', 'form-hint', `图片尺寸：${meta.width} × ${meta.height}${meta.missing ? ' · 文件缺失' : ''}`));
     }
 
-    form.appendChild(this._section('画幅校准', '世界坐标映射到图片像素的边界；改动画幅后请重新校准。'));
+    // 瓦片模式：画幅来自 manifest，calibration 只是单图兜底（字段仍可编辑）
+    const calSection = this._section('画幅校准', isTiles ? CAL_HINT_TILES : CAL_HINT_SINGLE);
+    const calHint = calSection.querySelector('.form-hint');
+    if (calHint) {
+      calHint.dataset.tilesCal = '1';
+      calHint.dataset.hintSingle = CAL_HINT_SINGLE;
+      calHint.dataset.hintTiles = CAL_HINT_TILES;
+    }
+    form.appendChild(calSection);
     const grid = el('div', 'form-grid form-grid-2');
     const calFields = [
       ['左边界 X', 'dim-xmin', 'calibration.xMin', calibration.xMin],
