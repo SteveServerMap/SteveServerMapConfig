@@ -292,3 +292,20 @@ window.__tool = {
 - 调试接口：`window.__tool.setOrigin({ px, py, pxPerBlock, flipZ })` 走同一套数学。
 - 注意：`canvas.imageToScreen()` / `worldToScreen()` 返回的是**画布容器内坐标**（不是页面 client 坐标），
   CDP/自动化里要自己加上 `#canvas-root` 的 `getBoundingClientRect()` 偏移。
+
+## 10. 交互体检修正（2026-11-05）
+
+按"反人类交互"体检结果修的几处（用户确认后实施）：
+
+1. **键盘不再劫持输入框**（`bindKeyboard`）：`isTypingTarget(target)` 为真时，`Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y` 交还浏览器
+   （否则文本撤销失效、且输入框显示与草稿会不同步）；`Ctrl+S` 仍接管（= 保存到站点）。
+   → e2e `x1-undo-redo` 在按 Ctrl+Z 前先把焦点移出输入框。
+2. **最小缩放 = 整图适配**（`EditorCanvas._minScaleFit`，默认 true）：`_effectiveMinScale()` = max(minScale, 整图适配)。
+   3584px 的图不再能缩到 72px。`_fitScale` 拆成 `_rawFitScale`（不钳制）+ `_fitScale`（钳制），避免递归。
+3. **切维度整图适配**（`activateDimension` 末尾 `canvas.fitToContent()`）：不同维度图幅不同，沿用旧缩放会只看到一角。
+4. **Esc 取消选中**：无拾取 / 放置 / 待建 / 弹窗时，Esc 清空选中。
+5. **应用内确认弹窗**（`showConfirm`）：删除路径点 / 分组 / 维度、"大量删点"防呆、覆盖草稿，全部改用 `#confirm-dialog`
+   （不再用 `window.confirm`）；`Esc` 或点遮罩 = 取消。
+   `#confirm-dialog` 结构在 `index.html`，样式在 `tool.css`（`.modal-panel.narrow / .confirm-message / .btn.danger`）。
+6. **合并页保存后清空分析**：底图已更新，旧的差异叠加层会误导 → `invalidateAll()` + 提示重新分析。
+

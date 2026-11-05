@@ -1643,6 +1643,14 @@ async function checkUndoRedo(ctx) {
     label: `改名后草稿里 name === ${renamed}`,
   });
 
+  // 键盘守卫：输入框里 Ctrl+Z 交还浏览器（不劫持），所以先把焦点移出输入框再测应用级撤销
+  await page.evalFn(() => {
+    if (document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
+    const canvas = document.getElementById('canvas-root');
+    if (canvas) canvas.focus?.();
+  });
+  await page.settle(160);
+
   // 撤销：一次编辑可能压入多条快照（editor 的 input 事件），因此允许连按几次，但必须回到原名
   let undoPresses = 0;
   for (; undoPresses < 3; undoPresses += 1) {
@@ -2200,15 +2208,29 @@ async function dragMarker(ctx, markerId, target) {
 async function checkDragMove(ctx) {
   const page = ctx.page;
 
-  /** 取画布上第一个「可见」的标记（rect 有效），返回 id 与中心点 */
+  /**
+   * 取一个「点下去真的能命中」的标记：密集堆叠时最上层的标记会接走 pointerdown，
+   * 所以用 elementsFromPoint 取该点最上层的 .marker，避免读到被盖住的那个点。
+   */
   const firstVisibleMarker = () =>
     page.evalFn(() => {
       const markers = [...document.querySelectorAll('#canvas-overlay .marker')];
       for (const el of markers) {
         const rect = el.getBoundingClientRect();
-        if (rect.width > 4 && rect.height > 4) {
-          return { id: String(el.dataset.id), x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
-        }
+        if (rect.width <= 4 || rect.height <= 4) continue;
+        const cx = Math.round(rect.left + rect.width / 2);
+        const cy = Math.round(rect.top + rect.height / 2);
+        const hit = (document.elementsFromPoint(cx, cy) || []).find((node) => node.closest && node.closest('.marker'));
+        const hitMarker = hit ? hit.closest('.marker') : null;
+        if (!hitMarker) continue;
+        // 命中别的标记也行，但要用「命中的那个」的 id 和它的几何中心
+        const hitRect = hitMarker.getBoundingClientRect();
+        return {
+          id: String(hitMarker.dataset.id),
+          x: Math.round(hitRect.left + hitRect.width / 2),
+          y: Math.round(hitRect.top + hitRect.height / 2),
+          pickedFrom: String(el.dataset.id),
+        };
       }
       return null;
     });

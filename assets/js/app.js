@@ -310,6 +310,8 @@ async function activateDimension(dimensionId) {
   refreshEditor();
   runValidation();
   updateMeta();
+  // 不同维度的图幅可能差很多：切维度后整图适配，避免沿用上一个维度的缩放导致只看到一角
+  if (size) canvas?.fitToContent?.({ animate: false });
 }
 
 async function loadImageFor(dim) {
@@ -534,6 +536,53 @@ function toggleEnhance() {
   }
   applyEnhance(next);
   toast(next ? '已提亮基底图（纯黑的是未探索区域）' : '已关闭提亮，显示原始亮度', 'info', 2600);
+}
+
+let confirmResolver = null;
+
+/**
+ * 应用内确认弹窗（替代 window.confirm）：
+ *   const ok = await showConfirm({ title, message, okText, danger });
+ * Esc / 取消 = false，确定 = true。
+ */
+function showConfirm({ title = '确认操作', message = '', okText = '确定', cancelText = '取消', danger = false } = {}) {
+  const dialog = $('confirm-dialog');
+  if (!dialog) return Promise.resolve(window.confirm(message || title)); // 兜底：结构缺失时退回原生
+  const titleEl = $('confirm-title-text');
+  const msgEl = $('confirm-message');
+  const okBtn = $('confirm-ok');
+  const cancelBtn = $('confirm-cancel');
+  if (titleEl) titleEl.textContent = title;
+  if (msgEl) msgEl.textContent = message;
+  if (okBtn) {
+    okBtn.textContent = okText;
+    okBtn.classList.toggle('danger', danger === true);
+  }
+  if (cancelBtn) cancelBtn.textContent = cancelText;
+  dialog.hidden = false;
+  dialog.setAttribute('aria-hidden', 'false');
+  requestAnimationFrame(() => (danger ? cancelBtn : okBtn)?.focus());
+  return new Promise((resolve) => {
+    confirmResolver = (value) => {
+      confirmResolver = null;
+      dialog.hidden = true;
+      dialog.setAttribute('aria-hidden', 'true');
+      resolve(value);
+    };
+  });
+}
+
+function settleConfirm(value) {
+  if (confirmResolver) confirmResolver(value === true);
+}
+
+/** 焦点是否在输入框 / 可编辑区域（键盘快捷键要放行给浏览器） */
+function isTypingTarget(target) {
+  if (!target || typeof target.closest !== 'function') return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  return !!target.closest('input, textarea, select, [contenteditable="true"]');
 }
 
 /** 画布左上角信息条：明确告诉用户当前显示的是哪张图、多大 */
@@ -897,10 +946,14 @@ async function saveWithGuard(config) {
     const lines = Object.keys(after.byDim || {})
       .filter((id) => (before.byDim[id] || 0) !== (after.byDim[id] || 0))
       .map((id) => `  ${id}: ${before.byDim[id] || 0} → ${after.byDim[id] || 0}`);
-    const ok = window.confirm(
-      `这次保存会让路径点总数从 ${before.total} 变成 ${after.total}：\n\n${lines.join('\n')}\n\n` +
-        '如果这不是你想要的，点「取消」，然后点「读取站点配置」重新载入。\n确定要保存吗？',
-    );
+    const ok = await showConfirm({
+      title: '这次保存会大量删除路径点',
+      message:
+        `路径点总数 ${before.total} → ${after.total}\n\n${lines.join('\n')}\n\n` +
+        '如果这不是你想要的，点「取消」，然后点「读取站点配置」重新载入。',
+      okText: '仍然保存',
+      danger: true,
+    });
     if (!ok) {
       const cancelErr = new Error('已取消保存（检测到会大量删除路径点）');
       cancelErr.cancelled = true;
@@ -911,7 +964,15 @@ async function saveWithGuard(config) {
 }
 
 async function reloadFromSite() {
-  if (state.dirty && !window.confirm('当前有未保存的修改，确定要用站点 config.json 覆盖吗？')) return;
+  if (state.dirty) {
+    const ok = await showConfirm({
+      title: '读取站点配置',
+      message: '当前有未保存的修改，确定要用站点 config.json 覆盖吗？',
+      okText: '覆盖',
+      danger: true,
+    });
+    if (!ok) return;
+  }
   const res = await api('/api/site-config');
   if (!res.ok) {
     toast(`读取失败：${res.error || '站点没有 config.json'}`, 'error', 4000);
@@ -1141,13 +1202,19 @@ function placeAt(world) {
   toast(`已放置到 X ${wp.x} · Z ${wp.z}`, 'ok', 2200);
 }
 
-function deleteWaypoint(id) {
+async function deleteWaypoint(id) {
   const dim = currentDimension();
   const targetId = id || state.selection.waypointId;
   if (!dim || !targetId) return toast('先选中一个路径点', 'warn');
   const wp = model.waypointById(dim, targetId);
   if (!wp) return;
-  if (!window.confirm(`删除路径点「${wp.name}」？`)) return;
+  const ok = await showConfirm({
+    title: '删除路径点',
+    message: `确定删除路径点「${wp.name}」？（可用 Ctrl+Z 撤销）`,
+    okText: '删除',
+    danger: true,
+  });
+  if (!ok) return;
   pushHistory();
   dim.waypoints = dim.waypoints.filter((w) => w.id !== targetId);
   state.selection.waypointId = null;
@@ -1177,14 +1244,22 @@ function newGroup() {
   toast(`已新建分组「${group.name}」`, 'ok', 2000);
 }
 
-function deleteGroup(id) {
+async function deleteGroup(id) {
   const dim = currentDimension();
   const targetId = id || state.selection.groupId;
   if (!dim || !targetId) return toast('先选中一个分组', 'warn');
   const group = dim.groups.find((g) => g.id === targetId);
   if (!group) return;
   const used = dim.waypoints.filter((w) => w.group === targetId).length;
-  if (used && !window.confirm(`分组「${group.name}」下还有 ${used} 个路径点，删除后它们会归入「未分组」。继续？`)) return;
+  if (used) {
+    const ok = await showConfirm({
+      title: '删除分组',
+      message: `分组「${group.name}」下还有 ${used} 个路径点，删除后它们会归入「未分组」。继续？`,
+      okText: '删除',
+      danger: true,
+    });
+    if (!ok) return;
+  }
   pushHistory();
   dim.groups = dim.groups.filter((g) => g.id !== targetId);
   const fallback = dim.groups.find((g) => g.id === 'default') || model.createGroup(state.draft, dim.id, { id: 'default', name: '未分组' });
@@ -1205,11 +1280,17 @@ function newDimension() {
   toast('已新建维度：先在右侧选基底图，再校准画幅', 'ok', 4000);
 }
 
-function deleteDimension() {
+async function deleteDimension() {
   const dim = currentDimension();
   if (!dim) return;
   if (state.draft.dimensions.length <= 1) return toast('至少要保留一个维度', 'warn');
-  if (!window.confirm(`删除维度「${dim.name}」及其 ${dim.waypoints.length} 个路径点？`)) return;
+  const ok = await showConfirm({
+    title: '删除维度',
+    message: `删除维度「${dim.name}」及其 ${dim.waypoints.length} 个路径点？`,
+    okText: '删除',
+    danger: true,
+  });
+  if (!ok) return;
   pushHistory();
   state.draft.dimensions = state.draft.dimensions.filter((d) => d.id !== dim.id);
   if (state.draft.defaultDimension === dim.id) {
@@ -1581,6 +1662,10 @@ function buildCalibrationDialog(dim, coords) {
   });
   const onKey = (event) => {
     if (event.key === 'Escape') {
+      if (confirmResolver) {
+        settleConfirm(false);
+        return;
+      }
       if (state.pendingPick) {
         // 拾取中按 Esc：只退出拾取，不关闭对话框
         exitPickMode();
@@ -1763,20 +1848,19 @@ async function api(path, { method = 'GET', body } = {}) {
 function bindKeyboard() {
   window.addEventListener('keydown', (event) => {
     const mod = event.ctrlKey || event.metaKey;
+    const typing = isTypingTarget(event.target);
+    // Ctrl+S 即使在输入框里也接管（草稿本身是自动保存的，这里=保存到站点），但提示更明确
     if (mod && event.key.toLowerCase() === 's') {
       event.preventDefault();
       saveToSite();
       return;
     }
-    if (mod && event.key.toLowerCase() === 'z') {
+    // 输入框 / 可编辑区域里，撤销与重做交还给浏览器（否则文本撤销失效、输入框还会和草稿不同步）
+    if (mod && (event.key.toLowerCase() === 'z' || event.key.toLowerCase() === 'y')) {
+      if (typing) return;
       event.preventDefault();
-      if (event.shiftKey) redo();
+      if (event.shiftKey || event.key.toLowerCase() === 'y') redo();
       else undo();
-      return;
-    }
-    if (mod && event.key.toLowerCase() === 'y') {
-      event.preventDefault();
-      redo();
       return;
     }
     if (event.key === 'Escape') {
@@ -1794,10 +1878,20 @@ function bindKeyboard() {
       }
       const dialog = $('preview-dialog');
       if (dialog && !dialog.hidden) closePreview();
+      if (state.selection.waypointId) {
+        handleSelect({ dimensionId: state.selection.dimensionId, waypointId: null, groupId: state.selection.groupId });
+      }
     }
     if (event.key === 'Delete' && state.selection.waypointId && !event.target.closest('input, textarea, select')) {
       deleteWaypoint();
     }
+  });
+
+  // 确认弹窗按钮
+  $('confirm-ok')?.addEventListener('click', () => settleConfirm(true));
+  $('confirm-cancel')?.addEventListener('click', () => settleConfirm(false));
+  $('confirm-dialog')?.addEventListener('click', (event) => {
+    if (event.target === $('confirm-dialog')) settleConfirm(false);
   });
 
   // 文件选择器

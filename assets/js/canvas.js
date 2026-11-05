@@ -163,6 +163,8 @@ export class EditorCanvas {
     this.ty = 0;
     this.minScale = MIN_SCALE;
     this.maxScale = MAX_SCALE;
+    /** true 时最小缩放取「整图适配」（和站点一致，避免把地图缩成一个点） */
+    this._minScaleFit = true;
     this._viewW = container.clientWidth || 0;
     this._viewH = container.clientHeight || 0;
 
@@ -490,9 +492,10 @@ export class EditorCanvas {
       console.warn(`[EditorCanvas] 非法缩放值已忽略：${String(value)}（保持当前比例）`);
       return fallback;
     }
-    if (v < this.minScale) {
+    const minScale = this._effectiveMinScale();
+    if (v < minScale) {
       this._warnClamp();
-      return this.minScale;
+      return minScale;
     }
     if (v > this.maxScale) {
       this._warnClamp();
@@ -506,7 +509,7 @@ export class EditorCanvas {
     const t = nowMs();
     if (t - this._lastClampWarn < 1200) return;
     this._lastClampWarn = t;
-    console.warn(`[EditorCanvas] 缩放比例超出范围，已钳制到 [${this.minScale}, ${this.maxScale}]。`);
+    console.warn(`[EditorCanvas] 缩放比例超出范围，已钳制到 [${this._effectiveMinScale()}, ${this.maxScale}]。`);
   }
 
   /** 以 anchor（容器内 CSS 像素，缺省为视口中心）为不动点缩放 factor 倍 */
@@ -549,17 +552,29 @@ export class EditorCanvas {
     this.zoomBy(1 / KEY_ZOOM_STEP, undefined, { animate: true });
   }
 
-  /** 整图适配比例 */
-  _fitScale(padding) {
+  /** 不钳制的「整图适配」比例（内部用，避免与动态下限递归） */
+  _rawFitScale(padding = FIT_PADDING) {
     if (!this._imageSize) return this.scale;
     const { width, height } = this._viewSize();
     const p = Math.max(0, Number(padding) || 0);
     const usableW = Math.max(1, width - p * 2);
     const usableH = Math.max(1, height - p * 2);
-    return this._resolveScale(
-      Math.min(usableW / this._imageSize.width, usableH / this._imageSize.height),
-      this.scale,
-    );
+    return Math.min(usableW / this._imageSize.width, usableH / this._imageSize.height);
+  }
+
+  /**
+   * 实际生效的最小缩放：开启 _minScaleFit 后不小于「整图适配」，
+   * 这样怎么滚轮缩小，地图最多缩到刚好铺满画布（3584px 的图不会变成 72px）。
+   */
+  _effectiveMinScale() {
+    if (!this._minScaleFit || !this._imageSize) return this.minScale;
+    const fit = this._rawFitScale(FIT_PADDING);
+    return Math.max(this.minScale, Math.min(this.maxScale, fit));
+  }
+
+  /** 整图适配比例 */
+  _fitScale(padding) {
+    return this._resolveScale(this._rawFitScale(padding), this.scale);
   }
 
   /** 整图适配：让整张底图完整落在容器内（留 padding） */

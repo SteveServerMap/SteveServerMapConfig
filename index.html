@@ -150,6 +150,25 @@
 </div>
 
 <!-- ============================ 预览弹层 ============================ -->
+<!-- 通用确认弹窗（替代 window.confirm，风格统一） -->
+<div id="confirm-dialog" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+  <div class="modal-panel narrow">
+    <header class="modal-head">
+      <h2 id="confirm-title" class="modal-title">
+        <svg class="icon" aria-hidden="true"><use href="#i-warning"></use></svg>
+        <span id="confirm-title-text">确认操作</span>
+      </h2>
+    </header>
+    <div class="modal-body">
+      <p id="confirm-message" class="confirm-message"></p>
+    </div>
+    <footer class="modal-foot">
+      <button id="confirm-cancel" class="btn ghost" type="button">取消</button>
+      <button id="confirm-ok" class="btn primary" type="button">确定</button>
+    </footer>
+  </div>
+</div>
+
 <div id="preview-dialog" class="modal" hidden role="dialog" aria-modal="true" aria-label="真实站点预览">
   <div class="modal-panel wide">
     <header class="modal-head">

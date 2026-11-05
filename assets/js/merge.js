@@ -424,6 +424,9 @@ async function saveToSite() {
       // 目标图被覆盖，重新载入以显示最新内容
       await reloadBaseImage(res.name);
     }
+    // 底图换了，之前的差异分析/合并预览已经过时（叠加层会画在旧底图的判断上）→ 清掉并提示
+    invalidateAll();
+    state.ui.setStatus(`已保存 ${res.name}，底图已更新；可再点「分析差异」确认结果`, 'ok');
   } catch (err) {
     console.error('[merge] 保存失败：', err);
     state.ui.setStatus(`保存失败：${err.message}`, 'error');

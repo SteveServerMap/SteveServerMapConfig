@@ -2485,3 +2485,36 @@ body[data-enhance="1"] #canvas-image {
   border-color: rgba(90, 210, 111, 0.55);
   background: rgba(90, 210, 111, 0.12);
 }
+
+/* ==========================================================================
+   通用确认弹窗（替代 window.confirm）
+   ========================================================================== */
+
+.modal-panel.narrow {
+  width: min(460px, calc(100vw - 32px));
+}
+
+.confirm-message {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.7;
+  font-size: 13px;
+  color: var(--text, #e8efe8);
+}
+
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px 14px;
+}
+
+.btn.danger {
+  color: #ffb4a8;
+  border-color: rgba(255, 120, 100, 0.55);
+  background: rgba(255, 90, 70, 0.16);
+}
+
+.btn.danger:hover {
+  background: rgba(255, 90, 70, 0.26);
+}
