@@ -2,7 +2,7 @@
  * merge.js —— 地图合并页面的控制器
  *
  * 流程：
- *   1. 载入站点 config.json，把「第一个维度的地图」作为目标图（也可自己选文件）；
+ *   1. 载入站点 config.json，把「第一个单图维度的地图」作为目标图（也可自己选文件）；
  *   2. 在新图上点一下世界 (0,0) + 填「每方块像素数」→ 得到它的校准；
  *   3. 「分析差异」= 把新图重采样到目标图网格 → 按 tile 分类 → 画叠加层 + 统计；
  *   4. 「按策略合并」= 按当前勾选合成 → 中间预览；
@@ -16,6 +16,7 @@ import {
   TILE,
   calibrationFromOrigin,
   calibrationFromBounds,
+  worldToPixel,
   resampleToBase,
   analyzeDiff,
   composeMerged,
@@ -87,7 +88,22 @@ function bindKeyboard() {
 
 /* ============================== 载入地图 ============================== */
 
-/** 用站点 config.json 里第一个维度的地图作为默认目标图 */
+function hasTiles(dim) {
+  const tiles = dim?.tiles;
+  return !!String((typeof tiles === 'string' ? tiles : tiles?.manifest) || '').trim();
+}
+
+// 兼容站点相对路径写法及 Windows 的大小写不敏感文件名。
+function imageKey(name) {
+  return String(name || '').trim().replace(/\\/g, '/').replace(/^(?:\.\/|\/)+/, '').toLowerCase();
+}
+
+function tiledFallback(config, fileName) {
+  const key = imageKey(fileName);
+  return config?.dimensions?.find((dim) => hasTiles(dim) && dim.image && imageKey(dim.image) === key);
+}
+
+/** 仅用单图维度作为默认目标图；瓦片维度的 image 只是回退图。 */
 async function loadDefaultBase() {
   let config = null;
   try {
@@ -96,9 +112,13 @@ async function loadDefaultBase() {
   } catch (err) {
     console.warn('[merge] 读取站点 config.json 失败：', err);
   }
-  const dim = config?.dimensions?.find((d) => d?.image) || null;
+  const dimensions = Array.isArray(config?.dimensions) ? config.dimensions : [];
+  const usesTiles = dimensions.some(hasTiles);
+  const dim = dimensions.find((d) => d?.image && !hasTiles(d) && !tiledFallback(config, d.image));
   if (!dim) {
-    state.ui.setStatus('站点没有可用的地图，请手动选择目标图', 'warn');
+    state.ui.setStatus(usesTiles
+      ? '站点地图使用瓦片，不能通过合并回退 PNG 更新地图。请返回主编辑器重新生成瓦片；也可手动选择独立图片合并并下载。'
+      : '站点没有可用的地图，请手动选择目标图', 'warn');
     return;
   }
   try {
@@ -119,7 +139,8 @@ async function loadDefaultBase() {
     const ppb = cal ? Number(cal.pxPerBlock.toFixed(6)) : 1;
     $('mg-base-ppb').value = String(ppb);
     $('mg-inc-ppb').value = String(ppb);
-    state.ui.setStatus(`目标图已载入：${dim.image}（${width}×${height}）`, 'ok');
+    state.ui.setStatus(`目标图已载入：${dim.image}（${width}×${height}）` +
+      (usesTiles ? '；已跳过瓦片地图，更新瓦片请返回主编辑器重新生成。' : ''), usesTiles ? 'warn' : 'ok');
   } catch (err) {
     state.ui.setStatus(`载入站点地图失败：${err.message}`, 'error');
   }
@@ -130,14 +151,7 @@ async function loadBaseFromFile(file) {
     const image = await fileToImage(file);
     const width = image.naturalWidth || image.width;
     const height = image.naturalHeight || image.height;
-    let cal = state.base.cal;
-    if (!cal) {
-      // 新载入的自定义目标图：如果之前有校准就沿用比例，原点待拾取
-      cal = null;
-    }
-    applyBase({ image, width, height, cal: null, fileName: file.name, label: '本地文件' });
-    state.ui.setBaseImage({ image, width, height, calibration: cal, label: '本地文件（请拾取 (0,0)）' });
-    state.ui.setSaveName(file.name);
+    applyBase({ image, width, height, cal: null, fileName: file.name, label: '本地文件（请拾取 (0,0)）' });
     state.ui.setStatus('目标图已更换：请点「拾取 (0,0)」在新图上标出世界原点', 'warn');
   } catch (err) {
     state.ui.setStatus(`载入失败：${err.message}`, 'error');
@@ -154,6 +168,7 @@ async function loadIncomingFromFile(file) {
     const basePpb = Number($('mg-base-ppb').value) || 1;
     $('mg-inc-ppb').value = String(basePpb);
     state.ui.setIncomingImage({ image, width, height, calibration: null, label: '待拾取原点' });
+    syncCalibrationInputs('incoming');
     state.ui.setStatus('新图已载入：在新图上点一下世界 (0,0) 的位置', 'warn');
     invalidateAll();
   } catch (err) {
@@ -164,11 +179,22 @@ async function loadIncomingFromFile(file) {
 function applyBase({ image, width, height, cal, fileName, label }) {
   state.base = { image, width, height, cal, fileName, label };
   state.ui.setBaseImage({ image, width, height, calibration: cal, label });
+  syncCalibrationInputs('base');
   state.ui.setSaveName(fileName || 'merged.png');
   invalidateAll();
 }
 
 /* ============================== 拾取原点 ============================== */
+
+function syncCalibrationInputs(which) {
+  const { cal } = which === 'base' ? state.base : state.incoming;
+  const prefix = which === 'base' ? 'mg-base' : 'mg-inc';
+  const origin = cal ? worldToPixel(cal, 0, 0) : null;
+  state.ui.setPickMarker(which, origin);
+  $(`${prefix}-ox`).value = origin ? String(Math.round(origin.px)) : '';
+  $(`${prefix}-oy`).value = origin ? String(Math.round(origin.py)) : '';
+  if (cal) $(`${prefix}-ppb`).value = String(Number(cal.pxPerBlock.toFixed(6)));
+}
 
 function handlePick(which, { px, py }) {
   handleOriginChange(which, { px, py }, { fromCanvas: true });
@@ -196,7 +222,7 @@ function handleOriginChange(which, point, { fromCanvas = false } = {}) {
     pxPerBlock,
     imageWidth: target.width,
     imageHeight: target.height,
-    flipZ: false,
+    flipZ: target.cal?.flipZ === true,
   });
   if (!cal) {
     state.ui.setStatus('无法根据当前参数计算校准', 'error');
@@ -226,10 +252,11 @@ function handlePpbChange(which, pxPerBlock) {
   const target = which === 'base' ? state.base : state.incoming;
   const prefix = which === 'base' ? 'mg-base' : 'mg-inc';
   const pick = {
-    px: Number($(`${prefix}-ox`)?.value),
-    py: Number($(`${prefix}-oy`)?.value),
+    px: Number($(`${prefix}-ox`)?.value.trim() || NaN),
+    py: Number($(`${prefix}-oy`)?.value.trim() || NaN),
   };
-  if (!(pxPerBlock > 0)) {
+  markAnalysisStale('比例已改，请重新点「分析差异」');
+  if (!(pxPerBlock > 0) || !Number.isFinite(pxPerBlock)) {
     state.ui.setStatus('「每方块像素数」要大于 0', 'error');
     return;
   }
@@ -253,8 +280,10 @@ function invalidateAll() {
 }
 
 function markAnalysisStale(message) {
+  const hadAnalysis = !!state.analysis;
+  invalidateAll();
   state.analysisStale = true;
-  if (state.analysis) state.ui.setStatus(message, 'warn');
+  if (hadAnalysis) state.ui.setStatus(message, 'warn');
 }
 
 /* ============================== 分析 / 合并 ============================== */
@@ -296,6 +325,7 @@ async function runAnalyze() {
     return;
   }
 
+  invalidateAll();
   state.ui.setBusy(true);
   await nextFrame();
   try {
@@ -339,10 +369,12 @@ async function runAnalyze() {
 }
 
 function runCompose({ keepBusy = false } = {}) {
-  if (!state.analysis) {
-    state.ui.setStatus('先点「分析差异」', 'warn');
+  if (state.analysisStale || !state.analysis) {
+    state.ui.setStatus('请重新点「分析差异」后再合并', 'warn');
     return;
   }
+  state.merged = null;
+  state.ui.setMergedPreview(null);
   if (!keepBusy) state.ui.setBusy(true);
   try {
     const options = state.ui.getOptions();
@@ -375,7 +407,10 @@ function recomposeIfPossible() {
 
 function mergedToCanvas() {
   const m = state.merged;
-  if (!m) return null;
+  if (state.analysisStale || !m) {
+    state.ui.setStatus('请重新分析并合并后再输出 PNG', 'warn');
+    return null;
+  }
   const canvas = document.createElement('canvas');
   canvas.width = m.width;
   canvas.height = m.height;
@@ -388,7 +423,9 @@ async function downloadMerged() {
   const canvas = mergedToCanvas();
   if (!canvas) return;
   const name = state.ui.getSaveName() || 'merged.png';
+  const merged = state.merged;
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  if (state.analysisStale || state.merged !== merged) return;
   if (!blob) {
     state.ui.setStatus('导出 PNG 失败', 'error');
     return;
@@ -411,8 +448,16 @@ async function saveToSite() {
     state.ui.setStatus('保存文件名必须以 .png / .jpg / .webp 结尾', 'error');
     return;
   }
+  const merged = state.merged;
   state.ui.setBusy(true);
   try {
+    // 保存前重读配置：主编辑器可能已启用瓦片，不能只检查启动时的配置。
+    const { config } = await api('/api/site-config');
+    if (!Array.isArray(config?.dimensions)) throw new Error('无法确认站点瓦片配置，请修复 config.json 后重试，或下载 PNG');
+    if (tiledFallback(config, fileName)) {
+      throw new Error('此文件是瓦片维度的回退图，不能在合并页覆盖。请返回主编辑器重新生成瓦片，或换文件名保存独立图片');
+    }
+    if (state.analysisStale || state.merged !== merged) return;
     const dataUrl = canvas.toDataURL('image/png');
     const res = await api('/api/import-image', { method: 'POST', body: { fileName, dataUrl } });
     state.ui.setStatus(
@@ -547,6 +592,7 @@ window.__merge = {
   setOptions: ({ fillNew, updateChanged }) => {
     if (typeof fillNew === 'boolean') $('mg-opt-fill').checked = fillNew;
     if (typeof updateChanged === 'boolean') $('mg-opt-update').checked = updateChanged;
+    recomposeIfPossible();
     return state.ui.getOptions();
   },
   setCalibration: (which, cal) => {
@@ -559,28 +605,13 @@ window.__merge = {
       calibration: cal,
       label: target.label,
     });
+    syncCalibrationInputs(which);
     invalidateAll();
     return cal;
   },
   setPick: (which, point) => {
-    const target = which === 'base' ? state.base : state.incoming;
-    target.cal = calibrationFromOrigin({
-      originPx: point.px,
-      originPy: point.py,
-      pxPerBlock: Number($(which === 'base' ? 'mg-base-ppb' : 'mg-inc-ppb').value) || 1,
-      imageWidth: target.width,
-      imageHeight: target.height,
-    });
-    state.ui.setPickMarker(which, point);
-    state.ui[which === 'base' ? 'setBaseImage' : 'setIncomingImage']({
-      image: target.image,
-      width: target.width,
-      height: target.height,
-      calibration: target.cal,
-      label: target.label,
-    });
-    invalidateAll();
-    return target.cal;
+    handleOriginChange(which, point);
+    return (which === 'base' ? state.base : state.incoming).cal;
   },
   setOriginPx: (which, point) => handleOriginChange(which, point),
   setPpb: (which, ppb) => {

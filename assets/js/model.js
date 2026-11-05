@@ -421,6 +421,8 @@ function normalizeUi(rawUi, warnings) {
   for (const key of ['grid', 'startCollapsed', 'showCoords']) {
     if (typeof rawUi[key] === 'boolean') ui[key] = rawUi[key];
   }
+  const span = rawUi.defaultSpanBlocks;
+  if (Number.isInteger(span) && span >= 64 && span <= 16384) ui.defaultSpanBlocks = span;
   return ui;
 }
 
@@ -731,12 +733,7 @@ export function toConfigJson(draft) {
       footer: typeof site.footer === 'string' ? site.footer : DEFAULT_SITE.footer,
     },
     defaultDimension: defaultDimension || dimensionIds[0] || '',
-    ui: {
-      labelMode: LABEL_MODES.includes(ui.labelMode) ? ui.labelMode : DEFAULT_UI.labelMode,
-      grid: typeof ui.grid === 'boolean' ? ui.grid : DEFAULT_UI.grid,
-      startCollapsed: typeof ui.startCollapsed === 'boolean' ? ui.startCollapsed : DEFAULT_UI.startCollapsed,
-      showCoords: typeof ui.showCoords === 'boolean' ? ui.showCoords : DEFAULT_UI.showCoords,
-    },
+    ui: normalizeUi(ui, []),
     dimensions,
   };
 }

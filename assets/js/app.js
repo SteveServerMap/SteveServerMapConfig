@@ -44,6 +44,12 @@ const state = {
   validation: { errors: [], warnings: [] },
   dirty: false,
   saving: false,
+  reloading: false,
+  loadToken: 0,
+  loadingDimension: false,
+  draftPending: false,
+  draftRevision: 0,
+  draftWrite: Promise.resolve(),
 
   /** 撤销栈 */
   history: { past: [], future: [], limit: 50 },
@@ -102,38 +108,6 @@ function currentDimension() {
   return byIndex;
 }
 
-/* ============================== 草稿 / 站点配置合并 ============================== */
-
-function tilesManifestOf(tiles) {
-  if (!tiles) return '';
-  if (typeof tiles === 'string') return String(tiles).trim();
-  if (typeof tiles === 'object') return String(tiles.manifest || '').trim();
-  return '';
-}
-
-/**
- * 草稿来自旧版本（或旧配置）时，可能缺少站点 config.json 里已经配好的 `tiles`。
- * 这时不能一味信任草稿，否则明明站点已经用瓦片，工具还会回退到 `主世界.png`。
- * 只补「草稿没有、站点有」的瓦片字段，不覆盖用户的其它编辑。
- * @returns {number} 补全的维度数量
- */
-function mergeTilesFromSite(draft, siteConfig) {
-  const siteDims = siteConfig && Array.isArray(siteConfig.dimensions) ? siteConfig.dimensions : [];
-  if (!draft || !Array.isArray(draft.dimensions) || !siteDims.length) return 0;
-  let merged = 0;
-  for (const siteDim of siteDims) {
-    const manifest = tilesManifestOf(siteDim && siteDim.tiles);
-    if (!manifest) continue;
-    const dim =
-      model.dimensionById(draft, siteDim.id) ||
-      draft.dimensions.find((item) => item && siteDim.name && item.name === siteDim.name);
-    if (!dim || tilesManifestOf(dim.tiles)) continue;
-    dim.tiles = { manifest };
-    merged += 1;
-  }
-  return merged;
-}
-
 /* ============================== 启动 ============================== */
 
 bootstrap().catch((err) => {
@@ -171,12 +145,13 @@ async function bootstrap() {
   // 这种情况下优先站点配置，否则工具会一直拿旧草稿里的 image: 主世界.png 当底图。
   let siteConfig = null;
   if (info.configExists) {
-    const res = await api('/api/site-config');
-    if (res.ok) {
+    try {
+      const res = await api('/api/site-config');
       state.schemaRef = typeof res.config.$schema === 'string' ? res.config.$schema : null;
       siteConfig = res.config;
-    } else {
-      console.warn('[tool] 读取站点 config.json 失败：', res.error);
+    } catch (err) {
+      if (!Array.isArray(info.draft?.dimensions)) throw err;
+      console.warn('[tool] 读取站点 config.json 失败，改用草稿：', err);
     }
   }
   const draftTime = info.draftMtime ? Date.parse(info.draftMtime) : NaN;
@@ -187,16 +162,12 @@ async function bootstrap() {
 
   let restored = false;
   let staleDraftIgnored = false;
-  let mergedTiles = 0;
   if (info.draft && info.draft.dimensions && (!draftOlderThanSite || !siteConfig)) {
     const { draft, warnings } = model.normalizeDraft(info.draft);
     state.draft = draft;
     restored = true;
+    state.dirty = !siteConfig || JSON.stringify(model.toConfigJson(draft)) !== JSON.stringify(model.toConfigJson(siteConfig));
     if (warnings.length) console.warn('[tool] 草稿规范化提示：', warnings);
-    if (siteConfig) {
-      mergedTiles = mergeTilesFromSite(state.draft, siteConfig);
-      if (mergedTiles) console.info(`[tool] 已从站点配置补全 ${mergedTiles} 个瓦片底图字段`);
-    }
   } else if (siteConfig) {
     const { draft, warnings } = model.normalizeDraft(siteConfig);
     state.draft = draft;
@@ -226,11 +197,7 @@ async function bootstrap() {
   updateMeta();
   bindKeyboard();
 
-  if (restored && mergedTiles) {
-    setStatus(`已恢复草稿，并从站点配置补全 ${mergedTiles} 个瓦片底图字段（旧草稿缺 tiles 时会一直回退单图）`, 'warn');
-    toast(`已恢复草稿，并补全 ${mergedTiles} 个瓦片底图`, 'warn', 4200);
-    scheduleAutosave();
-  } else if (staleDraftIgnored) {
+  if (staleDraftIgnored) {
     setStatus('草稿早于站点 config.json，已载入站点配置（旧草稿仍保留在 .data/draft.json）', 'ok');
     toast('草稿早于站点配置，已载入站点 config.json', 'info', 3600);
   } else {
@@ -349,7 +316,7 @@ function initCanvas() {
 function projectionFor(dim) {
   const coords = state.coords;
   const meta = (dim && dim.imageMeta) || {};
-  if (!coords || !dim || !(meta.width > 0) || !(meta.height > 0)) return null;
+  if (state.loadingDimension || !coords || !dim || !(meta.width > 0) || !(meta.height > 0)) return null;
 
   // 瓦片底图：世界范围来自 manifest 的 worldBlockRange（1 像素 = 1 方块），
   // 和站点一致 —— 此时 calibration 只是单图兜底用的，不参与换算。
@@ -373,18 +340,13 @@ function projectionFor(dim) {
     }
   }
 
-  const cal = dim.calibration || {};
-  const nums = [cal.xMin, cal.xMax, cal.zMin, cal.zMax].map(Number);
-  if (!nums.every(Number.isFinite) || nums[1] <= nums[0] || nums[3] <= nums[2]) return null;
+  const cal = coords.normalizeCalibration(dim.calibration, { imageWidth: meta.width, imageHeight: meta.height });
+  if (!cal) return null;
   try {
     const proj = coords.createProjection({
-      xMin: nums[0],
-      xMax: nums[1],
-      zMin: nums[2],
-      zMax: nums[3],
+      ...cal,
       imageWidth: meta.width,
       imageHeight: meta.height,
-      flipZ: cal.flipZ === true,
     });
     return proj && proj.isValid !== false ? proj : null;
   } catch (err) {
@@ -407,31 +369,48 @@ function previewStaticUrl(target) {
 }
 
 async function activateDimension(dimensionId) {
+  const token = ++state.loadToken;
+  disarmCreate();
+  disarmPlacement();
+  exitPickMode();
+  state.loadingDimension = true;
+  state.projection = null;
+  state.imageSize = null;
+  state.calibration = null;
+  canvas?.setImage({ src: '', width: 0, height: 0 });
+  canvas?.setProjection(null);
+  canvas?.setData({ waypoints: [], groups: [], projection: null });
   const dim =
     model.dimensionById(state.draft, dimensionId) ||
     state.draft.dimensions.find((d) => d.id === dimensionId) ||
     state.draft.dimensions[state.dimensionIndex ?? 0] ||
     state.draft.dimensions[0];
-  if (!dim) return;
+  if (!dim) {
+    state.loadingDimension = false;
+    updatePickPositionButton();
+    showCanvasEmpty('还没有维度，请先新建一个维度');
+    return;
+  }
   state.dimensionIndex = state.draft.dimensions.indexOf(dim);
   state.selection.dimensionId = dim.id;
   state.selection.waypointId = null;
   state.selection.groupId = null;
   state.picks = { a: null, b: null, origin: null };
-  exitPickMode();
+  updatePickPositionButton();
 
   let size = null;
   let usedTiles = false;
   if (hasTiles(dim)) {
-    size = await loadTilesFor(dim);
+    size = await loadTilesFor(dim, token);
+    if (token !== state.loadToken) return;
     usedTiles = Boolean(size);
-    // 瓦片加载失败（manifest 404 / 结构不对 / 老站点没有 tiles.js）→ 回退单张 image
-    if (!usedTiles) size = await loadImageFor(dim);
+    if (!usedTiles) size = await loadImageFor(dim, token);
   } else {
     dim.tileMeta = null;
-    canvas?.setTileset?.(null);
-    size = await loadImageFor(dim);
+    size = await loadImageFor(dim, token);
   }
+  if (token !== state.loadToken) return;
+  state.loadingDimension = false;
 
   if (!size) {
     showCanvasEmpty(
@@ -455,7 +434,8 @@ async function activateDimension(dimensionId) {
   return { size, usedTiles };
 }
 
-async function loadImageFor(dim) {
+async function loadImageFor(dim, token) {
+  if (token !== state.loadToken) return null;
   if (!dim.image) {
     canvas.setImage({ src: '', width: 0, height: 0 });
     dim.imageMeta = { width: 0, height: 0, missing: true };
@@ -468,6 +448,7 @@ async function loadImageFor(dim) {
     img.onerror = () => resolve(null);
     img.src = src;
   });
+  if (token !== state.loadToken) return null;
   if (!size || !size.width) {
     dim.imageMeta = { width: 0, height: 0, missing: true };
     canvas.setImage({ src: '', width: 0, height: 0 });
@@ -478,7 +459,7 @@ async function loadImageFor(dim) {
   ensureCalibration(dim, size);
   canvas.setImage({ src, width: size.width, height: size.height });
   updateCanvasInfo(dim);
-  autoEnhanceFor(src);
+  autoEnhanceFor(src, token);
   return size;
 }
 
@@ -489,7 +470,8 @@ async function loadImageFor(dim) {
  *   3. 把 Tileset 交给 EditorCanvas 渲染（canvas.setTileset）。
  * 失败时返回 null，由调用方回退到单张 image（与站点行为一致）。
  */
-async function loadTilesFor(dim) {
+async function loadTilesFor(dim, token) {
+  if (token !== state.loadToken) return null;
   const manifest = dim && dim.tiles ? String(dim.tiles.manifest || '').trim() : '';
   if (!manifest) {
     dim.tileMeta = { manifest: '', error: '没有填写瓦片清单路径' };
@@ -503,6 +485,7 @@ async function loadTilesFor(dim) {
   }
   try {
     const tileset = await state.tileModule.loadTileset(url);
+    if (token !== state.loadToken) return null;
     dim.tileMeta = {
       manifest,
       url,
@@ -530,6 +513,7 @@ async function loadTilesFor(dim) {
     applyEnhance(readEnhancePref() === true);
     return { width: tileset.imageWidth, height: tileset.imageHeight };
   } catch (err) {
+    if (token !== state.loadToken) return null;
     const message = err && err.message ? err.message : String(err);
     console.warn(`[tool] 瓦片底图加载失败：${url}`, err);
     dim.tileMeta = { manifest, url, error: message };
@@ -544,9 +528,8 @@ async function loadTilesFor(dim) {
  */
 function ensureCalibrationFromTiles(dim, tileset) {
   const cal = dim.calibration || {};
-  const nums = [cal.xMin, cal.xMax, cal.zMin, cal.zMax].map(Number);
-  const valid = nums.every(Number.isFinite) && nums[1] > nums[0] && nums[3] > nums[2];
-  if (valid && cal.calibrated === true) return;
+  const valid = state.coords?.normalizeCalibration(cal, { imageWidth: tileset.imageWidth, imageHeight: tileset.imageHeight });
+  if (valid) return;
   const { xMin, xMax, zMin, zMax } = tileset.bounds;
   dim.calibration = {
     calibrated: true,
@@ -562,8 +545,7 @@ function ensureCalibrationFromTiles(dim, tileset) {
 /** 新维度/坏画幅时给一组合理默认值（1 像素 = 1 方块、图片中心 = 世界原点），保证标记可见 */
 function ensureCalibration(dim, size) {
   const cal = dim.calibration || {};
-  const nums = [cal.xMin, cal.xMax, cal.zMin, cal.zMax].map(Number);
-  const valid = nums.every(Number.isFinite) && nums[1] > nums[0] && nums[3] > nums[2];
+  const valid = state.coords?.normalizeCalibration(cal, { imageWidth: size.width, imageHeight: size.height });
   if (valid) return;
   dim.calibration = {
     calibrated: false,
@@ -583,6 +565,13 @@ function ensureCalibration(dim, size) {
  */
 function syncAppProjection() {
   const dim = currentDimension();
+  if (state.loadingDimension || !dim) {
+    state.imageSize = null;
+    state.calibration = null;
+    state.projection = null;
+    updatePickPositionButton();
+    return null;
+  }
   const meta = (dim && dim.imageMeta) || {};
   state.imageSize = meta.width > 0 && meta.height > 0 ? { width: meta.width, height: meta.height } : null;
   // 瓦片维度：世界范围以 manifest 为准，state.calibration 同步成 manifest 的范围（供网格/读数使用）
@@ -598,18 +587,10 @@ function syncAppProjection() {
       note: '瓦片底图：世界范围来自 manifest',
     };
   } else {
-    const cal = (dim && dim.calibration) || null;
-    state.calibration = cal
-      ? {
-          xMin: Number(cal.xMin),
-          xMax: Number(cal.xMax),
-          zMin: Number(cal.zMin),
-          zMax: Number(cal.zMax),
-          flipZ: cal.flipZ === true,
-          calibrated: cal.calibrated === true,
-          note: cal.note || '',
-        }
-      : null;
+    state.calibration = state.coords?.normalizeCalibration(dim.calibration, {
+      imageWidth: meta.width,
+      imageHeight: meta.height,
+    }) || null;
   }
   state.projection = projectionFor(dim);
   updatePickPositionButton();
@@ -708,14 +689,14 @@ function analyzeImage(src) {
   });
 }
 
-function autoEnhanceFor(src) {
+function autoEnhanceFor(src, token) {
   const pref = state.enhancePref;
   if (pref !== null && pref !== undefined) {
     applyEnhance(pref === true);
     return;
   }
   analyzeImage(src).then((stats) => {
-    if (!stats) return;
+    if (!stats || token !== state.loadToken || state.enhancePref !== null) return;
     const dark = stats.litRatio < 0.45 || stats.mean < 42;
     applyEnhance(dark);
     if (dark) {
@@ -856,7 +837,7 @@ const NUMBER_FIELDS = new Set(['x', 'y', 'z', 'xMin', 'xMax', 'zMin', 'zMax']);
 function coerce(field, value) {
   const key = String(field).split('.').pop();
   if (!NUMBER_FIELDS.has(key)) return value;
-  if (value === '' || value === null || value === undefined) return key === 'y' ? null : 0;
+  if (value === '' || value === null || value === undefined) return null;
   const n = Number(value);
   return Number.isFinite(n) ? (key === 'y' || !Number.isInteger(n) ? n : Math.round(n)) : null;
 }
@@ -890,6 +871,9 @@ function handlePatch(patch) {
       } else if (patch.field === 'defaultDimension') {
         state.draft.defaultDimension = patch.value;
       } else {
+        if (patch.field === 'id' && state.draft.defaultDimension === dim.id) {
+          state.draft.defaultDimension = patch.value;
+        }
         dim[patch.field] = patch.value;
       }
       break;
@@ -914,6 +898,7 @@ function handlePatch(patch) {
       return;
   }
   commit({ structural: false });
+  if (patch.kind === 'dimension' && patch.field === 'image') activateDimension(dim.id);
 }
 
 /**
@@ -947,7 +932,8 @@ function handleTilesPatch(dim, patch) {
 }
 
 /** 提交一次修改：校验 → 刷新 → 标脏 → 自动保存 */
-function commit({ structural = false } = {}) {  state.dirty = true;
+function commit({ structural = false } = {}) {
+  state.dirty = true;
   runValidation();
   syncAppProjection();
   refreshCanvas();
@@ -991,6 +977,7 @@ function handleSelect(sel) {
 function pushHistory(mergeKey = null) {
   if (!state.draft) return;
   const now = Date.now();
+  state.history.future.length = 0;
   // 同一个字段的连续输入（<700ms）合并成一次撤销步骤，否则打一个字就要撤销一次
   if (mergeKey && state.history.lastMergeKey === mergeKey && now - state.history.lastPushAt < 700) {
     state.history.lastPushAt = now;
@@ -1011,6 +998,8 @@ function pushHistory(mergeKey = null) {
 }
 
 function restoreDraft(json) {
+  state.history.lastMergeKey = null;
+  state.history.lastPushAt = 0;
   const { draft } = model.normalizeDraft(JSON.parse(json));
   state.draft = draft;
   if (!model.dimensionById(draft, state.selection.dimensionId)) {
@@ -1075,16 +1064,36 @@ function runValidation() {
 /* ============================== 自动保存 ============================== */
 
 function scheduleAutosave() {
+  state.draftRevision += 1;
+  state.draftPending = true;
   clearTimeout(state.autosaveTimer);
-  state.autosaveTimer = setTimeout(async () => {
-    try {
-      await api('/api/draft', { method: 'PUT', body: { draft: state.draft } });
+  state.autosaveTimer = setTimeout(persistDraft, 800);
+}
+
+function persistDraft() {
+  const revision = ++state.draftRevision;
+  state.draftPending = true;
+  clearTimeout(state.autosaveTimer);
+  state.autosaveTimer = 0;
+  const snapshot = JSON.stringify(state.draft);
+  const write = state.draftWrite.then(() => api('/api/draft', {
+    method: 'PUT',
+    body: { draft: JSON.parse(snapshot) },
+  }));
+  state.draftWrite = write.then(() => {
+    state.draftPending = revision !== state.draftRevision ||
+      JSON.stringify(model.toConfigJson(state.draft)) !== JSON.stringify(model.toConfigJson(JSON.parse(snapshot)));
+    if (!state.draftPending) {
       const meta = $('draft-meta');
-      if (meta) meta.textContent = `草稿已自动保存 · ${new Date().toLocaleTimeString('zh-CN')}`;
-    } catch (err) {
-      console.warn('[tool] 草稿自动保存失败：', err);
+      if (meta) meta.textContent = `${state.dirty ? '未保存到站点 · ' : ''}草稿已自动保存 · ${new Date().toLocaleTimeString('zh-CN')}`;
     }
-  }, 800);
+    return true;
+  }, (err) => {
+    console.warn('[tool] 草稿自动保存失败：', err);
+    setStatus(`草稿自动保存失败：${err.message}，请暂勿关闭页面`, 'error');
+    return false;
+  });
+  return state.draftWrite;
 }
 
 function updateMeta() {
@@ -1092,7 +1101,7 @@ function updateMeta() {
   if (!meta || !state.draft) return;
   const dim = currentDimension();
   const counts = state.draft.dimensions.map((d) => `${d.name}:${d.waypoints.length}`).join(' · ');
-  meta.textContent = `未保存修改${dim ? ` · 当前 ${dim.name}` : ''} · ${counts}`;
+  meta.textContent = `${state.dirty ? '未保存修改' : '与站点配置一致'}${dim ? ` · 当前 ${dim.name}` : ''} · ${counts}`;
   document.title = `${state.dirty ? '● ' : ''}地图配置工具`;
 }
 
@@ -1164,7 +1173,7 @@ async function handleAction(name, actionEl) {
 /* ------------------------------ 保存 / 读取 ------------------------------ */
 
 async function saveToSite() {
-  if (state.saving) return { ok: false, error: '正在保存中' };
+  if (state.saving || state.reloading) return { ok: false, error: '正在保存或读取站点配置' };
   runValidation();
   const { errors } = state.validation;
   if (errors.length) {
@@ -1183,18 +1192,20 @@ async function saveToSite() {
   setStatus('正在保存…', 'info');
   try {
     let config = model.toConfigJson(state.draft);
+    const savedSnapshot = JSON.stringify(config);
     // 站点 config.json 首行的 $schema 只用于编辑器补全；model 会剥掉未知字段，这里补回去
     if (state.schemaRef) config = { $schema: state.schemaRef, ...config };
     const res = await saveWithGuard(config);
-    state.dirty = false;
+    state.dirty = savedSnapshot !== JSON.stringify(model.toConfigJson(state.draft));
     state.configExists = true;
     state.lastSaved = res.savedAt;
     updateMeta();
-    setStatus(`已保存到站点 config.json${res.backup ? `（原文件备份 ${res.backup}）` : ''}`, 'ok');
-    toast(`已写入 config.json（${res.bytes} 字节）`, 'ok', 3200);
-    const meta = $('draft-meta');
-    if (meta) meta.textContent = `已保存到站点 · ${new Date().toLocaleTimeString('zh-CN')}`;
-    document.title = '地图配置工具';
+    const message = state.dirty
+      ? '已保存提交时的版本；保存期间的新修改仍未写入站点'
+      : `已保存到站点 config.json${res.backup ? `（原文件备份 ${res.backup}）` : ''}`;
+    setStatus(message, state.dirty ? 'warn' : 'ok');
+    toast(message, state.dirty ? 'warn' : 'ok', 3200);
+    await persistDraft();
     return { ok: true, ...res, config };
   } catch (err) {
     if (err.cancelled) {
@@ -1243,31 +1254,43 @@ async function saveWithGuard(config) {
 }
 
 async function reloadFromSite() {
-  if (state.dirty) {
-    const ok = await showConfirm({
-      title: '读取站点配置',
-      message: '当前有未保存的修改，确定要用站点 config.json 覆盖吗？',
-      okText: '覆盖',
-      danger: true,
-    });
-    if (!ok) return;
+  if (state.saving || state.reloading) return toast('正在保存或读取站点配置，请稍候', 'warn');
+  state.reloading = true;
+  try {
+    if (state.dirty) {
+      const ok = await showConfirm({
+        title: '读取站点配置',
+        message: '当前有未保存的修改，确定要用站点 config.json 覆盖吗？',
+        okText: '覆盖',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    const previous = JSON.stringify(model.toConfigJson(state.draft));
+    const res = await api('/api/site-config');
+    if (previous !== JSON.stringify(model.toConfigJson(state.draft))) {
+      return toast('读取期间出现了新修改，已取消覆盖；请重新读取', 'warn', 4000);
+    }
+    const { draft, warnings } = model.normalizeDraft(res.config);
+    pushHistory();
+    state.schemaRef = typeof res.config.$schema === 'string' ? res.config.$schema : null;
+    state.draft = draft;
+    state.dirty = false;
+    const persisted = persistDraft();
+    if (warnings.length) console.warn('[tool] 规范化提示：', warnings);
+    const first = model.dimensionById(draft, draft.defaultDimension) || draft.dimensions[0];
+    state.selection = { dimensionId: first ? first.id : null, waypointId: null, groupId: null };
+    await activateDimension(state.selection.dimensionId);
+    if (!await persisted) {
+      return toast('已读取站点，但草稿更新失败；刷新前请重新读取', 'error', 5000);
+    }
+    setStatus(`已从站点读取 config.json${warnings.length ? `（${warnings.length} 条提示）` : ''}`, 'ok');
+    toast('已读取站点配置', 'ok', 2200);
+  } catch (err) {
+    toast(`读取失败：${err.message}`, 'error', 4000);
+  } finally {
+    state.reloading = false;
   }
-  const res = await api('/api/site-config');
-  if (!res.ok) {
-    toast(`读取失败：${res.error || '站点没有 config.json'}`, 'error', 4000);
-    return;
-  }
-  const { draft, warnings } = model.normalizeDraft(res.config);
-  pushHistory();
-  state.schemaRef = typeof res.config.$schema === 'string' ? res.config.$schema : state.schemaRef;
-  state.draft = draft;
-  state.dirty = false;
-  if (warnings.length) console.warn('[tool] 规范化提示：', warnings);
-  const first = model.dimensionById(draft, draft.defaultDimension) || draft.dimensions[0];
-  state.selection = { dimensionId: first ? first.id : null, waypointId: null, groupId: null };
-  await activateDimension(state.selection.dimensionId);
-  setStatus(`已从站点读取 config.json${warnings.length ? `（${warnings.length} 条提示）` : ''}`, 'ok');
-  toast('已读取站点配置', 'ok', 2200);
 }
 
 function exportJson() {
@@ -1304,8 +1327,8 @@ async function importImage(file) {
     dim.image = res.name;
     dim.calibration = dim.calibration || {};
     await refreshImageList();
-    const size = await loadImageFor(dim);
-    canvas?.fitToContent?.();
+    const result = currentDimension() === dim ? await activateDimension(dim.id) : null;
+    const size = result?.size;
     commit({ structural: true });
     setStatus(`已导入 ${res.name}（${res.width}×${res.height}${res.backup ? `，原文件备份 ${res.backup}` : ''}）`, size ? 'ok' : 'warn');
     toast(`已导入 ${res.name}；记得重新校准画幅`, 'ok', 4000);
@@ -1444,6 +1467,7 @@ function worldAtViewCenter() {
 function createWaypointAt(world, { prefix = '新路径点' } = {}) {
   const dim = currentDimension();
   if (!dim) return null;
+  pushHistory();
   const wp = model.createWaypoint(state.draft, dim.id, { name: `${prefix} ${dim.waypoints.length + 1}` });
   const fallback = worldAtViewCenter() || { x: 0, z: 0 };
   const target = world && Number.isFinite(world.x) && Number.isFinite(world.z) ? world : fallback;
@@ -1460,7 +1484,6 @@ function createWaypointAt(world, { prefix = '新路径点' } = {}) {
 function newWaypoint() {
   const dim = currentDimension();
   if (!dim) return;
-  pushHistory();
   const wp = createWaypointAt(worldAtViewCenter());
   if (!wp) return;
   toast(
@@ -1502,6 +1525,7 @@ function disarmCreate() {
 
 /** 放置模式：下一次点击画布 = 把该路径点移到点击处 */
 function armPlacement(waypointId, name) {
+  disarmCreate();
   state.placeFor = waypointId;
   state.pendingPick = null;
   state.pickHandler = null;
@@ -2100,7 +2124,7 @@ async function openPreview() {
     $('preview-dialog').hidden = false;
     const loaded = await new Promise((resolve) => {
       if (!frame) return resolve(false);
-      const timer = setTimeout(() => resolve(false), 20000);
+      const timer = setTimeout(() => done(false), 20000);
       const done = (ok) => {
         clearTimeout(timer);
         frame.removeEventListener('load', onLoad);
@@ -2212,6 +2236,14 @@ async function api(path, { method = 'GET', body } = {}) {
 }
 
 function bindKeyboard() {
+  window.addEventListener('beforeunload', (event) => {
+    if (!state.draftPending && !state.saving && !state.reloading) return;
+    event.preventDefault();
+    event.returnValue = '';
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && state.autosaveTimer) persistDraft();
+  });
   window.addEventListener('keydown', (event) => {
     const mod = event.ctrlKey || event.metaKey;
     const typing = isTypingTarget(event.target);
@@ -2276,7 +2308,9 @@ function bindKeyboard() {
       const { draft, warnings } = model.normalizeDraft(raw);
       pushHistory();
       state.draft = draft;
+      state.schemaRef = typeof raw.$schema === 'string' ? raw.$schema : null;
       state.dirty = true;
+      scheduleAutosave();
       const first = model.dimensionById(draft, draft.defaultDimension) || draft.dimensions[0];
       state.selection = { dimensionId: first ? first.id : null, waypointId: null, groupId: null };
       await activateDimension(state.selection.dimensionId);
@@ -2291,10 +2325,7 @@ function bindKeyboard() {
     if (event.target.id === 'preview-dialog') closePreview();
   });
   $('btn-preview-close')?.addEventListener('click', closePreview);
-  $('btn-preview-reload')?.addEventListener('click', () => {
-    const frame = $('preview-frame');
-    if (frame && state.previewToken) frame.src = `/preview/index.html?token=${state.previewToken}&t=${Date.now()}`;
-  });
+  $('btn-preview-reload')?.addEventListener('click', openPreview);
   $('btn-fit')?.addEventListener('click', () => canvas?.fitToContent?.());
   $('zoom-in')?.addEventListener('click', () => canvas?.zoomBy?.(1.35));
   $('zoom-out')?.addEventListener('click', () => canvas?.zoomBy?.(1 / 1.35));

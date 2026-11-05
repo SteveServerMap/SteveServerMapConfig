@@ -53,6 +53,21 @@ const SITE_DIR = path.resolve(TOOL_DIR, '..', 'SteveServerMap.github.io');
 const SITE_CONFIG = path.join(SITE_DIR, 'config.json');
 const SITE_SCHEMA = path.join(SITE_DIR, 'config.schema.json');
 const SITE_MARKERS = path.join(SITE_DIR, 'assets', 'js', 'markers.js');
+test('defaultSpanBlocks 在草稿与配置间往返保留且不接受越界值', () => {
+  for (const span of [64, 1200, 16384]) {
+    const raw = createEmptyDraft();
+    raw.ui.defaultSpanBlocks = span;
+    const { draft } = normalizeDraft(raw);
+    assert.equal(draft.ui.defaultSpanBlocks, span);
+    assert.equal(toConfigJson(draft).ui.defaultSpanBlocks, span);
+  }
+  for (const span of [null, '', '1024', 0, 63, 100.5, 16385, Infinity]) {
+    const raw = createEmptyDraft();
+    raw.ui.defaultSpanBlocks = span;
+    assert.equal(toConfigJson(normalizeDraft(raw).draft).ui.defaultSpanBlocks, undefined);
+  }
+});
+
 const siteConfigAvailable = fs.existsSync(SITE_CONFIG);
 const siteSchemaAvailable = fs.existsSync(SITE_SCHEMA);
 
@@ -923,18 +938,19 @@ test('dimensionById / waypointById：命中与未命中', () => {
 /* ========================================================================== */
 
 test('normalizeDraft：保留站点 config.json 的 tiles（对象写法）', { skip: !siteConfigAvailable }, () => {
-  const { draft, warnings } = normalizeDraft(readSiteConfig());
+  const source = readSiteConfig();
+  const original = source.dimensions.find((dim) => dim.id === 'overworld');
+  const { draft, warnings } = normalizeDraft(source);
   const overworld = dimensionById(draft, 'overworld');
   assert.ok(overworld, '应能规范化出 overworld 维度');
-  assert.deepEqual(overworld.tiles, { manifest: 'tiles/manifest.json' });
-  assert.equal(overworld.image, '主世界.png');
+  assert.deepEqual(overworld.tiles, original.tiles);
+  assert.equal(overworld.image, original.image);
   assert.equal(warnings.length, 0, `真实站点配置不应产生 warning：${JSON.stringify(warnings)}`);
 
-  // 导出后仍带 tiles（不能因为经过工具就退化成单图）
   const exported = toConfigJson(draft);
-  assert.deepEqual(exported.dimensions[0].tiles, { manifest: 'tiles/manifest.json' });
+  assert.deepEqual(dimensionById(exported, 'overworld').tiles, original.tiles);
   const roundTrip = normalizeDraft(exported).draft;
-  assert.deepEqual(dimensionById(roundTrip, 'overworld').tiles, { manifest: 'tiles/manifest.json' });
+  assert.deepEqual(dimensionById(roundTrip, 'overworld').tiles, original.tiles);
 });
 
 test('normalizeDraft：tiles 支持字符串简写，非法值降级为 null 并给 warning', () => {

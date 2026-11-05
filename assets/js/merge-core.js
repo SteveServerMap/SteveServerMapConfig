@@ -259,6 +259,7 @@ export function analyzeDiff({
   const rows = result.rows;
   const map = new Uint8Array(cols * rows);
   const counts = result.counts;
+  const pixelArea = { onlyIncoming: 0, changed: 0 };
   let baseLumSum = 0;
   let incLumSum = 0;
   let pixelCount = 0;
@@ -321,19 +322,23 @@ export function analyzeDiff({
       map[ty * cols + tx] = cls;
       if (cls === TILE.VOID) counts.void += 1;
       else if (cls === TILE.ONLY_BASE) counts.onlyBase += 1;
-      else if (cls === TILE.ONLY_INCOMING) counts.onlyIncoming += 1;
-      else if (cls === TILE.CHANGED) counts.changed += 1;
-      else counts.same += 1;
+      else if (cls === TILE.ONLY_INCOMING) {
+        counts.onlyIncoming += 1;
+        pixelArea.onlyIncoming += (xEnd - xStart) * (yEnd - yStart);
+      } else if (cls === TILE.CHANGED) {
+        counts.changed += 1;
+        pixelArea.changed += (xEnd - xStart) * (yEnd - yStart);
+      } else counts.same += 1;
     }
   }
 
-  // tile 数 → 方块面积（用 base 校准：每像素多少方块）
+  // 实际像素面积 → 方块面积（边缘 tile 必须裁到图片边界）
   const cal = base.cal;
   const bppX = cal ? (cal.xMax - cal.xMin) / w : 1;
   const bppZ = cal ? (cal.zMax - cal.zMin) / h : 1;
-  const areaPerTile = size * bppX * size * bppZ;
-  result.blocksArea.onlyIncoming = counts.onlyIncoming * areaPerTile;
-  result.blocksArea.changed = counts.changed * areaPerTile;
+  const areaPerPixel = bppX * bppZ;
+  result.blocksArea.onlyIncoming = pixelArea.onlyIncoming * areaPerPixel;
+  result.blocksArea.changed = pixelArea.changed * areaPerPixel;
   result.map = map;
   result.baseMean = pixelCount ? baseLumSum / pixelCount : 0;
   result.incomingMean = pixelCount ? incLumSum / pixelCount : 0;

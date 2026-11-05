@@ -245,6 +245,31 @@ test('analyzeDiff：面积按方块换算', () => {
   assert.equal(a.blocksArea.changed, 256);
 });
 
+test('analyzeDiff：边缘 tile 面积裁到实际图片尺寸（17×17 = 289）', () => {
+  for (const [width, height] of [[17, 17], [1, 1], [16, 16], [33, 9]]) {
+    for (const changed of [false, true]) {
+      const base = makeImage(width, height, null, changed ? [100, 100, 100, 255] : [0, 0, 0, 255]);
+      const incoming = makeImage(width, height, null, [200, 200, 200, 255]);
+      const a = analyzeDiff({ base, incoming, tileSize: 16 });
+      const key = changed ? 'changed' : 'onlyIncoming';
+      assert.equal(a.counts[key], Math.ceil(width / 16) * Math.ceil(height / 16));
+      assert.equal(a.blocksArea[key], width * height);
+    }
+  }
+});
+
+test('analyzeDiff：混合边缘分类分别按 X/Z 比例换算面积', () => {
+  const cal = calibrationFromBounds({ xMin: 0, xMax: 34, zMin: 0, zMax: 51, imageWidth: 17, imageHeight: 17, flipZ: true });
+  const base = makeImage(17, 17, cal, [100, 100, 100, 255]);
+  const incoming = makeImage(17, 17, cal, [100, 100, 100, 255]);
+  paint(base, 16, 0, 17, 17, [0, 0, 0, 255]);
+  paint(incoming, 0, 16, 16, 17, [200, 200, 200, 255]);
+  const a = analyzeDiff({ base, incoming, tileSize: 16 });
+  assert.deepEqual(Array.from(a.map), [TILE.SAME, TILE.ONLY_INCOMING, TILE.CHANGED, TILE.ONLY_INCOMING]);
+  assert.equal(a.blocksArea.onlyIncoming, 17 * 2 * 3);
+  assert.equal(a.blocksArea.changed, 16 * 2 * 3);
+});
+
 test('analyzeDiff：尺寸不一致/缺数据时不抛错并返回空 map', () => {
   const cal = calibrationFromOrigin({ originPx: 0, originPy: 0, pxPerBlock: 1, imageWidth: 8, imageHeight: 8 });
   const a = analyzeDiff({ base: makeImage(8, 8, cal), incoming: makeImage(4, 4, cal) });

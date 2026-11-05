@@ -1,0 +1,9 @@
+每次从xaero更新地图时
+SteveServerMap.github.io\tiles\overworld\tiles
+tiles这个文件夹需要删除
+否则push上去还是旧的
+
+后续需要更新地图
+将xaero导出的拆分地图移动到D:\Project\Github\SteveServerMapConfig\.data\2026-11-05_23.32.15
+
+多维度适配还没做

@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test tests/model.test.mjs tests/xaero-tiles.test.mjs",
+    "test": "node --experimental-vm-modules --test tests/model.test.mjs tests/xaero-tiles.test.mjs tests/app-state.test.mjs tests/server-integrity.test.mjs tests/merge-core.test.mjs tests/merge-controller.test.mjs",
     "e2e": "node tests/e2e.mjs"
   },
   "dependencies": {},

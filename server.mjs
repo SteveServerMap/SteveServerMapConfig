@@ -103,7 +103,63 @@ const log = (...args2) => console.log('[server]', ...args2);
 
 function stamp(date = new Date()) {
   const p = (n, w = 2) => String(n).padStart(w, '0');
-  return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
+  return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}${p(date.getMilliseconds(), 3)}`;
+}
+
+let mutationQueue = Promise.resolve();
+
+/** 请求体立即读取，但读盘、校验与写盘都按请求进入队列的顺序执行。 */
+function enqueueMutation(operation, body = Promise.resolve()) {
+  // 等待前一个操作时，请求体解析可能已经失败，先接住拒绝，轮到它时仍向调用方报错。
+  body.catch(() => {});
+  const result = mutationQueue.then(async () => operation(await body));
+  mutationQueue = result.catch(() => {});
+  return result;
+}
+
+/** 同目录独占创建临时文件，关闭后原子替换；失败不改动原文件。 */
+async function atomicWriteFile(filePath, text) {
+  const tmpPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.tmp-${randomBytes(8).toString('hex')}`);
+  const file = await fsp.open(tmpPath, 'wx');
+  try {
+    try {
+      await file.writeFile(text, 'utf8');
+    } finally {
+      await file.close();
+    }
+    await fsp.rename(tmpPath, filePath);
+  } finally {
+    await fsp.rm(tmpPath, { force: true });
+  }
+}
+
+/** 替换瓦片时保留旧目录，发布失败则回滚；回滚失败也不删除旧数据。 */
+async function replaceDirectory(tmpDir, outDir) {
+  const backupDir = path.join(path.dirname(outDir), `.bak-${path.basename(outDir)}-${randomBytes(8).toString('hex')}`);
+  let movedOld = false;
+  try {
+    await fsp.rename(outDir, backupDir);
+    movedOld = true;
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  try {
+    await fsp.rename(tmpDir, outDir);
+  } catch (err) {
+    if (movedOld) {
+      try {
+        await fsp.rename(backupDir, outDir);
+      } catch (rollbackErr) {
+        throw new AggregateError([err, rollbackErr], `替换瓦片及回滚失败，原瓦片保留在 ${backupDir}：${err.message}；${rollbackErr.message}`);
+      }
+    }
+    throw err;
+  }
+  if (movedOld) {
+    await fsp.rm(backupDir, { recursive: true, force: true }).catch((err) => {
+      console.warn(`[server] 清理旧瓦片失败，保留在 ${backupDir}：`, err.message);
+    });
+  }
 }
 
 function sendJson(res, status, payload) {
@@ -367,6 +423,8 @@ async function listSiteImages() {
   return out.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
 }
 
+let backupSequence = 0;
+
 /**
  * 把 filePath 复制到站点仓库的 .backups/ 下，返回相对站点目录的备份路径；文件不存在返回 null。
  * 只保留最近 KEEP_BACKUPS 份，避免无限膨胀。
@@ -375,8 +433,9 @@ async function backupInto(filePath, kind) {
   if (!fs.existsSync(filePath)) return null;
   await fsp.mkdir(SITE_BACKUP_DIR, { recursive: true });
   const base = path.basename(filePath);
-  const target = path.join(SITE_BACKUP_DIR, base + ".bak-" + stamp());
-  await fsp.copyFile(filePath, target);
+  const suffix = `${String(++backupSequence).padStart(10, '0')}-${randomBytes(6).toString('hex')}`;
+  const target = path.join(SITE_BACKUP_DIR, base + ".bak-" + stamp() + '-' + suffix);
+  await fsp.copyFile(filePath, target, fs.constants.COPYFILE_EXCL);
   try {
     const entries = (await fsp.readdir(SITE_BACKUP_DIR))
       .filter((name) => name.startsWith(base + ".bak-"))
@@ -496,17 +555,20 @@ async function handleApi(req, res, url) {
   }
 
   if (route === '/api/draft' && method === 'PUT') {
-    const body = await readJsonBody(req);
-    if (!body || typeof body !== 'object' || !body.draft) throw new HttpError(400, '缺少 draft 字段');
-    await fsp.mkdir(DATA_DIR, { recursive: true });
-    const text = JSON.stringify(body.draft, null, 2) + '\n';
-    await fsp.writeFile(DRAFT_FILE, text, 'utf8');
-    return sendJson(res, 200, { ok: true, savedAt: new Date().toISOString(), bytes: Buffer.byteLength(text) });
+    return enqueueMutation(async (body) => {
+      if (!body || typeof body !== 'object' || !body.draft) throw new HttpError(400, '缺少 draft 字段');
+      await fsp.mkdir(DATA_DIR, { recursive: true });
+      const text = JSON.stringify(body.draft, null, 2) + '\n';
+      await atomicWriteFile(DRAFT_FILE, text);
+      return sendJson(res, 200, { ok: true, savedAt: new Date().toISOString(), bytes: Buffer.byteLength(text) });
+    }, readJsonBody(req));
   }
 
   if (route === '/api/draft' && method === 'DELETE') {
-    await fsp.rm(DRAFT_FILE, { force: true });
-    return sendJson(res, 200, { ok: true });
+    return enqueueMutation(async () => {
+      await fsp.rm(DRAFT_FILE, { force: true });
+      return sendJson(res, 200, { ok: true });
+    });
   }
 
   if (route === '/api/image-meta' && method === 'GET') {
@@ -547,49 +609,50 @@ async function handleApi(req, res, url) {
   }
 
   if (route === '/api/save' && method === 'POST') {
-    const body = await readJsonBody(req);
-    const config = body.config;
-    if (!config || typeof config !== 'object' || !Array.isArray(config.dimensions)) {
-      throw new HttpError(400, 'config 必须是包含 dimensions 数组的对象');
-    }
-    const configPath = path.join(SITE_DIR, 'config.json');
-
-    // ---- 写前防呆：如果这次保存会「大量减少」路径点，必须显式确认 ----
-    // （工具是本地单用户，但误点一次「保存到站点」不该把几十个路径点冲掉）
-    if (!body.confirm) {
-      const before = await countWaypointsOfFile(configPath);
-      const after = countWaypointsOfConfig(config);
-      const removed = before.total - after.total;
-      if (before.total > 0 && removed >= 3 && removed / before.total > 0.2) {
-        await appendSaveLog({ event: 'refused', before: before.total, after: after.total, siteDir: SITE_DIR });
-        return sendJson(res, 409, {
-          ok: false,
-          code: 'CONFIRM_REQUIRED',
-          error: `这次保存会删除 ${removed} 个路径点（${before.total} → ${after.total}），已拦住`,
-          before,
-          after,
-        });
+    return enqueueMutation(async (body) => {
+      const config = body.config;
+      if (!config || typeof config !== 'object' || !Array.isArray(config.dimensions)) {
+        throw new HttpError(400, 'config 必须是包含 dimensions 数组的对象');
       }
-    }
-    await fsp.mkdir(SITE_DIR, { recursive: true });
-    const backup = await backupInto(configPath, "config.json");
-    const text = JSON.stringify(config, null, 2) + '\n';
-    await fsp.writeFile(configPath, text, 'utf8');
-    await appendSaveLog({
-      event: 'saved',
-      siteDir: SITE_DIR,
-      counts: countWaypointsOfConfig(config),
-      bytes: Buffer.byteLength(text),
-      confirmed: body.confirm === true,
-    });
-    log(`已写入 ${configPath}（${Buffer.byteLength(text)} 字节）${backup ? `，备份 ${backup}` : ''}`);
-    return sendJson(res, 200, {
-      ok: true,
-      path: configPath,
-      backup,
-      bytes: Buffer.byteLength(text),
-      savedAt: new Date().toISOString(),
-    });
+      const configPath = path.join(SITE_DIR, 'config.json');
+
+      // ---- 写前防呆：如果这次保存会「大量减少」路径点，必须显式确认 ----
+      // （工具是本地单用户，但误点一次「保存到站点」不该把几十个路径点冲掉）
+      if (!body.confirm) {
+        const before = await countWaypointsOfFile(configPath);
+        const after = countWaypointsOfConfig(config);
+        const removed = before.total - after.total;
+        if (before.total > 0 && removed >= 3 && removed / before.total > 0.2) {
+          await appendSaveLog({ event: 'refused', before: before.total, after: after.total, siteDir: SITE_DIR });
+          return sendJson(res, 409, {
+            ok: false,
+            code: 'CONFIRM_REQUIRED',
+            error: `这次保存会删除 ${removed} 个路径点（${before.total} → ${after.total}），已拦住`,
+            before,
+            after,
+          });
+        }
+      }
+      await fsp.mkdir(SITE_DIR, { recursive: true });
+      const backup = await backupInto(configPath, "config.json");
+      const text = JSON.stringify(config, null, 2) + '\n';
+      await atomicWriteFile(configPath, text);
+      await appendSaveLog({
+        event: 'saved',
+        siteDir: SITE_DIR,
+        counts: countWaypointsOfConfig(config),
+        bytes: Buffer.byteLength(text),
+        confirmed: body.confirm === true,
+      });
+      log(`已写入 ${configPath}（${Buffer.byteLength(text)} 字节）${backup ? `，备份 ${backup}` : ''}`);
+      return sendJson(res, 200, {
+        ok: true,
+        path: configPath,
+        backup,
+        bytes: Buffer.byteLength(text),
+        savedAt: new Date().toISOString(),
+      });
+    }, readJsonBody(req));
   }
 
   if (route === '/api/preview-token' && method === 'POST') {
@@ -639,8 +702,8 @@ async function handleApi(req, res, url) {
         tileSize,
         keepBlack: body.keepBlack === true,
       });
-      await fsp.rm(outDir, { recursive: true, force: true });
-      await fsp.rename(tmpDir, outDir);
+      // 发布也串行，避免同一维度的两个生成请求在替换或回滚时互相覆盖。
+      await enqueueMutation(() => replaceDirectory(tmpDir, outDir));
       const summary = {
         ok: true,
         folder,
@@ -687,10 +750,16 @@ const server = http.createServer(async (req, res) => {
   }
 
   const method = req.method || 'GET';
-  const finish = () => log(`${method} ${decodeURIComponent(url.pathname)}${url.search ? '?…' : ''} ${res.statusCode} ${Date.now() - started}ms`);
+  let logPath = url.pathname;
+  const finish = () => log(`${method} ${logPath}${url.search ? '?…' : ''} ${res.statusCode} ${Date.now() - started}ms`);
   res.on('finish', finish);
 
   try {
+    try {
+      logPath = decodeURIComponent(url.pathname);
+    } catch {
+      throw new HttpError(400, '400 Bad Request');
+    }
     if (url.pathname.startsWith('/api/')) {
       await handleApi(req, res, url);
       return;
@@ -701,7 +770,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // 工具自身静态资源
-    let rel = decodeURIComponent(url.pathname);
+    let rel = logPath;
     if (rel === '/' || rel === '') rel = '/index.html';
     const resolved = path.resolve(TOOL_DIR, `.${rel}`);
     if (!resolved.startsWith(TOOL_DIR + path.sep)) return sendText(res, 403, '403 Forbidden');
