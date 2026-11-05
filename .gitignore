@@ -2,6 +2,9 @@
 .data/
 *.bak-*
 
+# Xaero 导出图 / 区域缓存（本地源数据，体积可能很大，不提交）
+xaero/
+
 # 测试产物（截图/报告）
 tests/artifacts/*
 !tests/artifacts/.gitignore

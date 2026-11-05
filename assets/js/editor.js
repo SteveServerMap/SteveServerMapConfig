@@ -47,6 +47,32 @@ const TILES_MODE_OPTIONS = [
 ];
 const TONE_SET = new Set(['info', 'ok', 'warn', 'error']);
 
+/** xaero 子目录名 ↔ 站点维度：中英文叫法不同，先归一化再匹配。 */
+const XAERO_ALIASES = new Map([
+  ['overworld', ['overworld', 'world', '主世界', '地表', '地面']],
+  ['nether', ['nether', 'thenether', '下界', '地狱']],
+  ['theend', ['theend', 'end', '末地', '末路之地']],
+].map(([canonical, aliases]) => [
+  canonical,
+  new Set(aliases.map((name) => normalizeXaeroName(name))),
+]));
+
+function normalizeXaeroName(value) {
+  return String(value == null ? '' : value)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_.-]+/g, '');
+}
+
+function canonicalXaeroName(value) {
+  const key = normalizeXaeroName(value);
+  if (!key) return '';
+  for (const [canonical, aliases] of XAERO_ALIASES) {
+    if (aliases.has(key)) return canonical;
+  }
+  return key;
+}
+
 /** model.js 缺席时的图标兜底表（与站点 markers.js 的 ICONS 一致）。 */
 const FALLBACK_ICONS = Object.freeze({
   pin: '🧷', home: '🏠', village: '🏘️', farm: '🌾', mine: '⛏️', portal: '🌀', chest: '📦',
@@ -293,6 +319,7 @@ export class EditorPanel {
     this._query = '';
     this._collapsed = new Set();
     this._images = [];
+    this._xaeroSources = [];
     this._activeDimensionId = null;
     this._dirty = false;
     this._savedAt = null;
@@ -811,6 +838,16 @@ export class EditorPanel {
     if (ctx.kind === 'dimension' || ctx.kind === 'empty' || ctx.kind === 'overview') {
       if (!this._isFormFocused()) this._renderForm();
     }
+  }
+
+  /** /api/state 的 xaero 列表：[{folder, kind, images, regions, bounds, bytes}]。 */
+  setXaeroSources(sources) {
+    const list = Array.isArray(sources) ? sources : [];
+    this._xaeroSources = list
+      .filter((item) => item && typeof item === 'object' && item.folder)
+      .map((item) => ({ ...item }));
+    const ctx = this._selectionContext();
+    if (ctx.kind === 'dimension' && !this._isFormFocused()) this._renderForm();
   }
 
   /** { siteDir, siteExists } 或 'D:/…/SteveServerMap.github.io'。 */
@@ -1852,6 +1889,80 @@ export class EditorPanel {
     return '';
   }
 
+  /** 找当前维度对应的 xaero 子目录（按 id / 名称 / 中英文别名匹配）。 */
+  _xaeroSourceFor(dim) {
+    if (!dim) return null;
+    const wanted = new Set(
+      [dim.id, dim.name].map((value) => canonicalXaeroName(value)).filter(Boolean),
+    );
+    if (!wanted.size) return null;
+    for (const source of this._xaeroSources) {
+      if (wanted.has(canonicalXaeroName(source.folder))) return source;
+    }
+    return null;
+  }
+
+  /** 「XAERO 瓦片源」区块：显示 xaero/<维度>/ 的扫描结果 + 生成按钮。 */
+  _xaeroSection(dim) {
+    const section = this._section(
+      'XAERO 瓦片源',
+      '工具会扫描 xaero/ 下的一级子目录；每个子目录对应一个维度（支持 x<X>_z<Z>.png 导出图或区域 zip）。',
+    );
+    section.dataset.xaeroSummary = '1';
+    const source = this._xaeroSourceFor(dim);
+    const refresh = this._actionButton('重新扫描 xaero', 'refresh-xaero');
+
+    if (!source) {
+      const available = this._xaeroSources
+        .filter((item) => item && item.folder && item.kind !== 'empty')
+        .map((item) => item.folder);
+      section.appendChild(el(
+        'p',
+        'form-hint',
+        available.length
+          ? `没有匹配到「${str(dim.name) || str(dim.id)}」的源文件夹。现有可用：xaero/${available.join('、')}`
+          : `没有可用的源文件夹：把 Xaero 导出 PNG 放进 xaero/${str(dim.name) || '主世界'}/ 后点「重新扫描 xaero」。`,
+      ));
+      section.appendChild(refresh);
+      return section;
+    }
+
+    const kindText = source.kind === 'png'
+      ? `${source.images} 张导出 PNG`
+      : source.kind === 'region'
+        ? `${source.regions} 个区域 zip`
+        : '空文件夹';
+    const bounds = source.bounds && typeof source.bounds === 'object' ? source.bounds : null;
+    section.appendChild(el(
+      'p',
+      'form-hint',
+      `源：xaero/${source.folder} · ${kindText}${bounds
+        ? ` · X[${fmtBlock(bounds.xMin)}, ${fmtBlock(bounds.xMax)}] Z[${fmtBlock(bounds.zMin)}, ${fmtBlock(bounds.zMax)}]`
+        : ''}`,
+    ));
+
+    if (source.kind === 'empty') {
+      section.appendChild(el(
+        'p',
+        'form-hint form-warn',
+        `xaero/${source.folder} 还是空的：先放导出图（文件名要带 x<X>_z<Z>）或区域 zip，再点「重新扫描 xaero」。`,
+      ));
+      section.appendChild(refresh);
+      return section;
+    }
+
+    section.appendChild(el(
+      'p',
+      'form-hint',
+      `输出：tiles/${str(dim.id)}/manifest.json（生成会覆盖这个目录里已有的瓦片）。`,
+    ));
+    const generate = this._actionButton(`从 xaero/${source.folder} 生成瓦片`, 'generate-xaero-tiles');
+    generate.dataset.xaeroFolder = source.folder;
+    generate.title = '读取该目录的导出图并切成站点瓦片，然后把当前维度切换到瓦片底图';
+    section.append(generate, refresh);
+    return section;
+  }
+
   /**
    * 「瓦片底图」摘要：dim.tileMeta 是 **工具专用** 数据（app.js 在 manifest 加载后写入，
    * 不导出、不进草稿文件）。这里只读不写。
@@ -2026,6 +2137,9 @@ export class EditorPanel {
     // 瓦片摘要：dim.tileMeta 由 app.js 加载 manifest 后写入（工具专用，不导出）
     const tilesSection = this._tilesSection(dim);
     form.appendChild(tilesSection);
+
+    // XAERO 源：扫描 xaero/<维度>/，可直接生成该维度的站点瓦片
+    form.appendChild(this._xaeroSection(dim));
 
     // 单图模式下先隐藏瓦片相关行（切换类型时由 _applyTilesModeView 就地显示）
     if (!isTiles) {

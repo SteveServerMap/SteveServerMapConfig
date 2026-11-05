@@ -40,18 +40,21 @@ import zlib from 'node:zlib';
 
 /* ------------------------------- 参数 ------------------------------- */
 
-const args = process.argv.slice(2);
-const target = args.find((a) => !a.startsWith('--'));
+// 这个文件既当 CLI 用，也被 make-tiles / xaero-tiles 当模块 import。
+// 参数解析和“缺参数就退出”只在真正执行本文件时做，import 时不能碰 process.exit。
+const IS_CLI = Boolean(process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('xaero-decode.mjs'));
+const args = IS_CLI ? process.argv.slice(2) : [];
 const opt = (name, fallback) => {
   const hit = args.find((a) => a.startsWith(`--${name}=`));
   return hit ? hit.slice(name.length + 3) : fallback;
 };
-const OUT = opt('out', null);
-const MAX_SIDE = Number(opt('max', 0)) || 0;
+let target = IS_CLI ? args.find((a) => !a.startsWith('--')) : null;
+let OUT = IS_CLI ? opt('out', null) : null;
+let MAX_SIDE = IS_CLI ? Number(opt('max', 0)) || 0 : 0;
 /** 整数降采样倍数：2 = 每个输出像素代表 2×2 方块（用来把 8 万方块宽的世界塞进一张图） */
-const SCALE = Math.max(1, Math.floor(Number(opt('scale', 1)) || 1));
+let SCALE = IS_CLI ? Math.max(1, Math.floor(Number(opt('scale', 1)) || 1)) : 1;
 
-if (!target || !OUT) {
+if (IS_CLI && (!target || !OUT)) {
   console.error('用法：node tools/xaero-decode.mjs <region-xxx.zip | 目录> --out=<输出.png> [--max=4096]');
   process.exit(2);
 }

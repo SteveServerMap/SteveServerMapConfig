@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test tests/model.test.mjs",
+    "test": "node --test tests/model.test.mjs tests/xaero-tiles.test.mjs",
     "e2e": "node tests/e2e.mjs"
   },
   "dependencies": {},

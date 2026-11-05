@@ -27,7 +27,10 @@ const state = {
   /** 站点信息（来自 /api/state） */
   siteDir: '',
   toolDir: '',
+  xaeroDir: '',
   images: [],
+  /** xaero/ 下的一级子目录扫描结果（每个子目录 = 一个维度） */
+  xaeroSources: [],
   siteExists: false,
   configExists: false,
   lastSaved: null,
@@ -99,6 +102,38 @@ function currentDimension() {
   return byIndex;
 }
 
+/* ============================== 草稿 / 站点配置合并 ============================== */
+
+function tilesManifestOf(tiles) {
+  if (!tiles) return '';
+  if (typeof tiles === 'string') return String(tiles).trim();
+  if (typeof tiles === 'object') return String(tiles.manifest || '').trim();
+  return '';
+}
+
+/**
+ * 草稿来自旧版本（或旧配置）时，可能缺少站点 config.json 里已经配好的 `tiles`。
+ * 这时不能一味信任草稿，否则明明站点已经用瓦片，工具还会回退到 `主世界.png`。
+ * 只补「草稿没有、站点有」的瓦片字段，不覆盖用户的其它编辑。
+ * @returns {number} 补全的维度数量
+ */
+function mergeTilesFromSite(draft, siteConfig) {
+  const siteDims = siteConfig && Array.isArray(siteConfig.dimensions) ? siteConfig.dimensions : [];
+  if (!draft || !Array.isArray(draft.dimensions) || !siteDims.length) return 0;
+  let merged = 0;
+  for (const siteDim of siteDims) {
+    const manifest = tilesManifestOf(siteDim && siteDim.tiles);
+    if (!manifest) continue;
+    const dim =
+      model.dimensionById(draft, siteDim.id) ||
+      draft.dimensions.find((item) => item && siteDim.name && item.name === siteDim.name);
+    if (!dim || tilesManifestOf(dim.tiles)) continue;
+    dim.tiles = { manifest };
+    merged += 1;
+  }
+  return merged;
+}
+
 /* ============================== 启动 ============================== */
 
 bootstrap().catch((err) => {
@@ -123,27 +158,50 @@ async function bootstrap() {
   Object.assign(state, {
     siteDir: info.siteDir,
     toolDir: info.toolDir,
+    xaeroDir: info.xaeroDir || '',
     images: info.images || [],
+    xaeroSources: Array.isArray(info.xaero) ? info.xaero : [],
     siteExists: info.siteExists,
     configExists: info.configExists,
     lastSaved: info.lastSaved,
   });
   $('footer-site').textContent = `站点目录：${state.siteDir}${state.siteExists ? '' : '（不存在！）'}`;
 
+  // 草稿可能比站点 config.json 还旧（例如站点后来切到了瓦片底图）。
+  // 这种情况下优先站点配置，否则工具会一直拿旧草稿里的 image: 主世界.png 当底图。
+  let siteConfig = null;
+  if (info.configExists) {
+    const res = await api('/api/site-config');
+    if (res.ok) {
+      state.schemaRef = typeof res.config.$schema === 'string' ? res.config.$schema : null;
+      siteConfig = res.config;
+    } else {
+      console.warn('[tool] 读取站点 config.json 失败：', res.error);
+    }
+  }
+  const draftTime = info.draftMtime ? Date.parse(info.draftMtime) : NaN;
+  const configTime = info.lastSaved ? Date.parse(info.lastSaved) : NaN;
+  // 同一秒内保存时 mtime 可能相等或差几毫秒，留 1 秒容差，避免误判「草稿过期」
+  const draftOlderThanSite =
+    Number.isFinite(draftTime) && Number.isFinite(configTime) && draftTime < configTime - 1000;
+
   let restored = false;
-  if (info.draft && info.draft.dimensions) {
+  let staleDraftIgnored = false;
+  let mergedTiles = 0;
+  if (info.draft && info.draft.dimensions && (!draftOlderThanSite || !siteConfig)) {
     const { draft, warnings } = model.normalizeDraft(info.draft);
     state.draft = draft;
     restored = true;
     if (warnings.length) console.warn('[tool] 草稿规范化提示：', warnings);
-  } else if (info.configExists) {
-    const res = await api('/api/site-config');
-    if (res.ok) {
-      state.schemaRef = typeof res.config.$schema === 'string' ? res.config.$schema : null;
-      const { draft, warnings } = model.normalizeDraft(res.config);
-      state.draft = draft;
-      if (warnings.length) console.warn('[tool] 站点配置规范化提示：', warnings);
+    if (siteConfig) {
+      mergedTiles = mergeTilesFromSite(state.draft, siteConfig);
+      if (mergedTiles) console.info(`[tool] 已从站点配置补全 ${mergedTiles} 个瓦片底图字段`);
     }
+  } else if (siteConfig) {
+    const { draft, warnings } = model.normalizeDraft(siteConfig);
+    state.draft = draft;
+    staleDraftIgnored = Boolean(info.draft && draftOlderThanSite);
+    if (warnings.length) console.warn('[tool] 站点配置规范化提示：', warnings);
   }
   if (!state.draft) {
     state.draft = model.createEmptyDraft();
@@ -156,6 +214,7 @@ async function bootstrap() {
   state.enhancePref = readEnhancePref();
   setDragMove(readDragMovePref(), { silent: true });
   panel?.setImages?.(state.images);
+  panel?.setXaeroSources?.(state.xaeroSources);
 
   const firstDim =
     model.dimensionById(state.draft, state.draft.defaultDimension) || state.draft.dimensions[0];
@@ -167,15 +226,24 @@ async function bootstrap() {
   updateMeta();
   bindKeyboard();
 
-  setStatus(
-    restored
-      ? '已恢复上次编辑的草稿（点「读取站点配置」可丢弃）'
-      : state.configExists
-        ? '已载入站点 config.json'
-        : '空白配置',
-    restored ? 'warn' : 'ok',
-  );
-  if (restored) toast('已恢复上次编辑的草稿', 'info', 2600);
+  if (restored && mergedTiles) {
+    setStatus(`已恢复草稿，并从站点配置补全 ${mergedTiles} 个瓦片底图字段（旧草稿缺 tiles 时会一直回退单图）`, 'warn');
+    toast(`已恢复草稿，并补全 ${mergedTiles} 个瓦片底图`, 'warn', 4200);
+    scheduleAutosave();
+  } else if (staleDraftIgnored) {
+    setStatus('草稿早于站点 config.json，已载入站点配置（旧草稿仍保留在 .data/draft.json）', 'ok');
+    toast('草稿早于站点配置，已载入站点 config.json', 'info', 3600);
+  } else {
+    setStatus(
+      restored
+        ? '已恢复上次编辑的草稿（点「读取站点配置」可丢弃）'
+        : state.configExists
+          ? '已载入站点 config.json'
+          : '空白配置',
+      restored ? 'warn' : 'ok',
+    );
+    if (restored) toast('已恢复上次编辑的草稿', 'info', 2600);
+  }
 
   window.__tool = api2tool();
 }
@@ -212,7 +280,7 @@ async function loadSiteTiles() {
 
 function initPanel() {
   panel = new EditorPanel($('app'), {
-    onAction: handleAction,
+    onAction: (name, actionEl) => handleAction(name, actionEl),
     onChange: handlePatch,
     onSelect: handleSelect,
     onImportImage: (file) => importImage(file),
@@ -1030,7 +1098,7 @@ function updateMeta() {
 
 /* ============================== 动作 ============================== */
 
-async function handleAction(name) {
+async function handleAction(name, actionEl) {
   switch (name) {
     case 'save':
       return saveToSite();
@@ -1079,6 +1147,10 @@ async function handleAction(name) {
       return toggleDragMove();
     case 'goto-calibrate':
       return openCalibrationDialog();
+    case 'generate-xaero-tiles':
+      return generateXaeroTilesFromSource(actionEl && actionEl.dataset ? actionEl.dataset.xaeroFolder : '');
+    case 'refresh-xaero':
+      return refreshXaeroSources({ announce: true });
     case 'copy-command':
       return copyCommand();
     case 'open-site-folder':
@@ -1259,6 +1331,93 @@ async function refreshImageList() {
     panel?.setImages?.(state.images);
   } catch (err) {
     console.warn('[tool] 刷新图片列表失败：', err);
+  }
+}
+
+/* ------------------------------ XAERO 瓦片生成 ------------------------------ */
+
+/** 重新扫描 xaero/ 下的一级子目录（每个子目录 = 一个维度）。 */
+async function refreshXaeroSources({ announce = false } = {}) {
+  try {
+    const res = await api('/api/xaero/sources');
+    state.xaeroSources = Array.isArray(res.sources) ? res.sources : [];
+    // 点击「重新扫描」后焦点还在按钮上；先失焦，表单才会重建并显示最新结果
+    if (document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
+    panel?.setXaeroSources?.(state.xaeroSources);
+    if (announce) {
+      const usable = state.xaeroSources.filter((item) => item.kind !== 'empty').length;
+      toast(
+        usable
+          ? `已扫描 xaero/：${usable} 个可用源目录（共 ${state.xaeroSources.length} 个）`
+          : `已扫描 xaero/：没有可用源（把导出 PNG 放进 xaero/<维度名>/）`,
+        usable ? 'ok' : 'warn',
+        3600,
+      );
+    }
+    return state.xaeroSources;
+  } catch (err) {
+    console.warn('[tool] 扫描 xaero 源失败：', err);
+    if (announce) toast(`扫描 xaero 源失败：${err.message}`, 'error', 5000);
+    return [];
+  }
+}
+
+/** 从 xaero/<folder> 生成当前维度的站点瓦片，并切换到瓦片底图。 */
+async function generateXaeroTilesFromSource(folder) {
+  const dim = currentDimension();
+  if (!dim) return toast('先选一个维度', 'warn');
+  const name = String(folder || '').trim();
+  const source = state.xaeroSources.find((item) => item.folder === name);
+  if (!source) {
+    return toast('找不到这个 xaero 源目录，先点「重新扫描 xaero」', 'warn', 4000);
+  }
+  if (source.kind === 'empty') {
+    return toast(`xaero/${name} 还是空的：先放导出 PNG 或区域 zip`, 'warn', 4500);
+  }
+  const kindText = source.kind === 'png'
+    ? `${source.images} 张导出 PNG`
+    : `${source.regions} 个区域 zip`;
+  const outRel = `tiles/${dim.id}`;
+  const ok = await showConfirm({
+    title: '从 XAERO 生成瓦片',
+    message:
+      `源：xaero/${name}（${kindText}）\n` +
+      `输出：${outRel}/manifest.json\n\n` +
+      `会覆盖 ${outRel}/ 里已有的瓦片，并在生成后自动把「${dim.name}」切换到瓦片底图。` +
+      `确认后开始生成。`,
+    okText: '开始生成',
+  });
+  if (!ok) return;
+
+  setStatus(`正在从 xaero/${name} 生成瓦片…`, 'warn');
+  toast('正在解码并切瓦片，可能需要几秒，请不要关闭页面…', 'info', 8000);
+  try {
+    const res = await api('/api/xaero/generate', {
+      method: 'POST',
+      body: { folder: name, dimensionId: dim.id },
+    });
+    pushHistory();
+    dim.tiles = { manifest: res.manifest };
+    dim.tileMeta = null;
+    commit({ structural: true });
+    await activateDimension(dim.id);
+    await refreshXaeroSources();
+    const stats = res.stats && typeof res.stats === 'object' ? res.stats : {};
+    const seconds = Number.isFinite(res.durationMs) ? (res.durationMs / 1000).toFixed(1) : '?';
+    setStatus(`已生成 ${res.manifest}（${res.levels} 层，${stats.tilesWritten ?? '?'} 张瓦片）`, 'ok');
+    toast(
+      `瓦片已生成：${res.manifest}（${res.levels} 层 / ${stats.tilesWritten ?? '?'} 张，${seconds}s）；` +
+        `记得点「保存到站点」写入 config.json`,
+      'ok',
+      7000,
+    );
+    return res;
+  } catch (err) {
+    setStatus(`生成瓦片失败：${err.message}`, 'error');
+    toast(`生成瓦片失败：${err.message}`, 'error', 6500);
+    return null;
   }
 }
 

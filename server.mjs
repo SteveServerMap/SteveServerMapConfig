@@ -24,6 +24,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { generateXaeroTiles, inspectXaeroSource } from './tools/xaero-tiles.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOOL_DIR = __dirname;
@@ -56,6 +57,11 @@ const DATA_DIR = path.resolve(
   String(args.data || process.env.SSM_DATA || path.join(TOOL_DIR, '.data')),
 );
 const DRAFT_FILE = path.join(DATA_DIR, 'draft.json');
+
+/** xaero 源目录：每个一级子目录代表一个维度（如 xaero/主世界、xaero/地狱、xaero/末地） */
+const XAERO_DIR = path.resolve(
+  String(args.xaero || process.env.SSM_XAERO || path.join(TOOL_DIR, 'xaero')),
+);
 
 /* ============================== 常量 ============================== */
 
@@ -166,6 +172,53 @@ function resolveInsideSite(name) {
   if (full !== path.join(SITE_DIR, cleaned)) throw new HttpError(400, `路径越界：${cleaned}`);
   if (!full.startsWith(SITE_DIR + path.sep)) throw new HttpError(400, `路径越界：${cleaned}`);
   return full;
+}
+
+/** xaero 子目录名 / 维度 id 都只允许单层名字，禁止路径穿越 */
+function resolveXaeroFolder(folder) {
+  const cleaned = String(folder == null ? '' : folder).trim();
+  if (!cleaned || cleaned === '.' || cleaned === '..') throw new HttpError(400, 'xaero 维度目录名不能为空');
+  if (cleaned.includes('/') || cleaned.includes('\\') || cleaned.includes('\0')) {
+    throw new HttpError(400, `非法的 xaero 维度目录名：${cleaned}`);
+  }
+  const full = path.resolve(XAERO_DIR, cleaned);
+  if (path.dirname(full) !== XAERO_DIR) throw new HttpError(400, `路径越界：${cleaned}`);
+  return full;
+}
+
+/** 维度 id 直接用来做 tiles/<id>/ 目录名，必须能安全落盘 */
+function safeDimensionId(id) {
+  const cleaned = String(id == null ? '' : id).trim();
+  if (!cleaned || cleaned === '.' || cleaned === '..') throw new HttpError(400, '缺少维度 id');
+  if (cleaned.includes('/') || cleaned.includes('\\') || cleaned.includes('\0') || /[\r\n]/.test(cleaned)) {
+    throw new HttpError(400, `维度 id 不能用作目录名：${cleaned}`);
+  }
+  return cleaned;
+}
+
+/** 扫描 xaero/ 下的一级子目录，返回每个维度的源信息（不解码整图） */
+async function listXaeroSources() {
+  let entries = [];
+  try {
+    entries = await fsp.readdir(XAERO_DIR, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const sourceDir = path.join(XAERO_DIR, entry.name);
+    const scan = await inspectXaeroSource(sourceDir);
+    out.push({
+      folder: entry.name,
+      kind: scan.kind,
+      images: scan.images,
+      regions: scan.regions,
+      bounds: scan.bounds,
+      bytes: scan.bytes,
+    });
+  }
+  return out.sort((a, b) => a.folder.localeCompare(b.folder, 'zh-CN'));
 }
 
 /** 解析图片原始尺寸：PNG / JPEG / WEBP 头解析，失败返回 null */
@@ -406,17 +459,26 @@ async function handleApi(req, res, url) {
       /* ignore */
     }
     const sitePkg = fs.existsSync(path.join(SITE_DIR, 'assets', 'js', 'coords.js'));
+    let draftMtime = null;
+    try {
+      draftMtime = (await fsp.stat(DRAFT_FILE)).mtime.toISOString();
+    } catch {
+      /* 没有草稿 */
+    }
     return sendJson(res, 200, {
       ok: true,
       siteDir: SITE_DIR,
       toolDir: TOOL_DIR,
       dataDir: DATA_DIR,
+      xaeroDir: XAERO_DIR,
       siteExists,
       sitePackage: sitePkg,
       configExists,
       lastSaved,
+      draftMtime,
       images: await listSiteImages(),
       draft: await readDraft(),
+      xaero: await listXaeroSources(),
       host: HOST,
       port: PORT,
     });
@@ -547,6 +609,69 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ok: true, token, ttl: PREVIEW_TOKEN_TTL });
   }
 
+  if (route === '/api/xaero/sources' && method === 'GET') {
+    return sendJson(res, 200, { ok: true, root: XAERO_DIR, sources: await listXaeroSources() });
+  }
+
+  if (route === '/api/xaero/generate' && method === 'POST') {
+    const body = await readJsonBody(req);
+    const folder = String(body.folder == null ? '' : body.folder).trim();
+    const dimensionId = safeDimensionId(body.dimensionId);
+    const sourceDir = resolveXaeroFolder(folder);
+    const sourceStat = await fsp.stat(sourceDir).catch(() => null);
+    if (!sourceStat || !sourceStat.isDirectory()) {
+      throw new HttpError(404, `xaero 源目录不存在：${folder}`);
+    }
+    const scan = await inspectXaeroSource(sourceDir);
+    if (scan.kind === 'empty') {
+      throw new HttpError(422, `xaero/${folder} 里没有可用的导出 PNG（文件名需带 x<X>_z<Z>）或区域 zip`);
+    }
+    const tileSize = Math.max(64, Math.min(1024, Math.round(Number(body.tileSize) || 256) & ~1));
+    const outRel = `tiles/${dimensionId}`;
+    const outDir = path.join(SITE_DIR, 'tiles', dimensionId);
+    const tmpDir = path.join(SITE_DIR, 'tiles', `.tmp-${dimensionId}-${stamp()}-${randomBytes(3).toString('hex')}`);
+    const started = Date.now();
+    try {
+      // 先生成到临时目录，成功后再替换：生成失败不会把站点上已有的瓦片弄坏。
+      const manifest = await generateXaeroTiles({
+        sourceDir,
+        outDir: tmpDir,
+        tileSize,
+        keepBlack: body.keepBlack === true,
+      });
+      await fsp.rm(outDir, { recursive: true, force: true });
+      await fsp.rename(tmpDir, outDir);
+      const summary = {
+        ok: true,
+        folder,
+        dimensionId,
+        manifest: `${outRel}/manifest.json`,
+        outDir: outRel,
+        bounds: manifest.worldBlockRange,
+        width: manifest.worldBlockRange.xMax - manifest.worldBlockRange.xMin,
+        height: manifest.worldBlockRange.zMax - manifest.worldBlockRange.zMin,
+        levels: manifest.levels.length,
+        stats: manifest.stats,
+        durationMs: Date.now() - started,
+      };
+      log(
+        `已生成 xaero/${folder} → ${outRel}（${manifest.stats.tilesWritten} 张瓦片，` +
+          `${manifest.levels.length} 层，${summary.durationMs}ms）`,
+      );
+      await appendSaveLog({
+        event: 'xaero-generate',
+        siteDir: SITE_DIR,
+        folder,
+        dimensionId,
+        manifest: summary.manifest,
+        stats: manifest.stats,
+      });
+      return sendJson(res, 200, summary);
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
   throw new HttpError(404, `未知接口：${method} ${route}`);
 }
 
@@ -598,6 +723,7 @@ server.listen(PORT, HOST, () => {
   log(`配置工具已启动：http://${HOST}:${PORT}/`);
   log(`工具目录：${TOOL_DIR}`);
   log(`站点目录：${SITE_DIR}${siteOk ? '' : '  ⚠ 不存在（保存会失败，用 --site= 指定）'}`);
+  log(`xaero 源目录：${XAERO_DIR}${fs.existsSync(XAERO_DIR) ? '' : '  ⚠ 不存在（瓦片生成不可用）'}`);
   if (!fs.existsSync(path.join(SITE_DIR, 'assets', 'js', 'coords.js'))) {
     log('⚠ 站点目录里没找到 assets/js/coords.js：预览与投影会不可用，请检查 --site 是否指向 SteveServerMap.github.io');
   }
