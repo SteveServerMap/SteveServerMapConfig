@@ -364,8 +364,6 @@ function draw() {
   ctx.lineWidth = 1;
   ctx.fillStyle = 'rgba(170, 210, 175, 0.6)';
   ctx.font = '11px ui-monospace, monospace';
-  const halfW = cv.width / 2 / scale;
-  const halfH = cv.height / 2 / scale;
   for (let gx = Math.ceil((camX - halfW) / gridStep) * gridStep; gx <= camX + halfW; gx += gridStep) {
     const sx = (gx - camX) * scale + cv.width / 2;
     ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, cv.height); ctx.stroke();
