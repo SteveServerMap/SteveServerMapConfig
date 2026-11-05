@@ -315,6 +315,7 @@ export function decodeRegionPayload(payload) {
               const hasTopHeight = (parametres & 0x1000000) !== 0;
 
               let blockId = null;
+              let overlayColor = null;
               if (hasState) {
                 if (stateInline) {
                   const reader = makeNbtReader(payload.subarray(p));
@@ -333,14 +334,19 @@ export function decodeRegionPayload(payload) {
                 for (let o = 0; o < overlays; o += 1) {
                   const overlayParam = i32();
                   const overlayHasState = (overlayParam & 1) !== 0;
-                  if (overlayHasState) {
-                    if ((overlayParam & 0x400) !== 0) {
-                      const reader = makeNbtReader(payload.subarray(p));
-                      reader.readRoot();
-                      p += reader.offset;
-                    } else {
-                      i32();
-                    }
+                  if (!overlayHasState) {
+                    // bit0 = 0：水层覆盖（Xaero 把水存成 overlay，所以主方块是海底）
+                    overlayColor = BLOCK_COLORS.get('minecraft:water');
+                  } else if ((overlayParam & 0x400) !== 0) {
+                    const reader = makeNbtReader(payload.subarray(p));
+                    const nbt = reader.readRoot();
+                    p += reader.offset;
+                    const id = typeof nbt?.id === 'string' ? nbt.id : null;
+                    blockPalette.push(id); // overlay 与方块共用同一个调色板
+                    overlayColor = colorOf(id);
+                  } else {
+                    const idx = i32();
+                    overlayColor = colorOf(blockPalette[idx] ?? null);
                   }
                 }
               }
@@ -356,7 +362,7 @@ export function decodeRegionPayload(payload) {
 
               const worldX = cx * TILES * TILE_BLOCKS + tx * TILE_BLOCKS + bx;
               const worldZ = cz * TILES * TILE_BLOCKS + tz * TILE_BLOCKS + bz;
-              const color = colorOf(blockId);
+              const color = overlayColor || colorOf(blockId);
               if (color) {
                 const out = (worldZ * width + worldX) * 4;
                 blocks[out] = color[0];
