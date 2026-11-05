@@ -58,8 +58,15 @@
       <input id="mg-base-file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
 
       <div class="mg-canvas-wrap">
-        <canvas id="mg-base-canvas" class="mg-canvas" width="512" height="512"></canvas>
-        <div id="mg-base-hint" class="mg-canvas-hint">载入后在此点一下世界原点 (0,0)</div>
+        <canvas id="mg-base-canvas" class="mg-canvas" width="512" height="512" tabindex="0"></canvas>
+        <div id="mg-base-hint" class="mg-canvas-hint">滚轮缩放 / 拖动平移 · 点「拾取 (0,0)」后点图上的世界原点</div>
+        <div class="mg-zoom-panel" role="group" aria-label="目标图缩放">
+          <button id="mg-base-zoom-in" class="mg-zoom-btn" type="button" aria-label="放大">+</button>
+          <span id="mg-base-zoom" class="mg-zoom-level">100%</span>
+          <button id="mg-base-zoom-out" class="mg-zoom-btn" type="button" aria-label="缩小">−</button>
+          <button id="mg-base-zoom-fit" class="mg-zoom-btn" type="button" aria-label="适应窗口" title="适应窗口">⤢</button>
+        </div>
+        <div id="mg-base-cursor" class="mg-cursor">px —, —</div>
       </div>
 
       <div class="mg-controls">
@@ -71,6 +78,19 @@
           <input id="mg-base-ppb" type="number" step="any" min="0.001" value="1">
         </label>
         <span id="mg-base-cal" class="mg-cal">—</span>
+      </div>
+
+      <div class="mg-controls mg-origin-row">
+        <span class="mg-origin-label">原点像素</span>
+        <input id="mg-base-ox" class="mg-origin-input" type="number" step="1" placeholder="x" title="世界 (0,0) 在该图上的像素 X">
+        <input id="mg-base-oy" class="mg-origin-input" type="number" step="1" placeholder="y" title="世界 (0,0) 在该图上的像素 Y">
+        <span class="mg-nudge" role="group" aria-label="微调原点">
+          <button type="button" data-nudge="base:-1:0" title="左移 1 像素">←</button>
+          <button type="button" data-nudge="base:0:-1" title="上移 1 像素">↑</button>
+          <button type="button" data-nudge="base:0:1" title="下移 1 像素">↓</button>
+          <button type="button" data-nudge="base:1:0" title="右移 1 像素">→</button>
+        </span>
+        <span class="mg-origin-hint">可直接输入数字精确设置，或用方向键微调</span>
       </div>
     </section>
 
@@ -86,8 +106,15 @@
       </div>
 
       <div class="mg-canvas-wrap mg-center-wrap">
-        <canvas id="mg-result-canvas" class="mg-canvas" width="512" height="512"></canvas>
+        <canvas id="mg-result-canvas" class="mg-canvas" width="512" height="512" tabindex="0"></canvas>
         <div id="mg-result-hint" class="mg-canvas-hint">分析差异后这里显示合并结果</div>
+        <div class="mg-zoom-panel" role="group" aria-label="结果预览缩放">
+          <button id="mg-result-zoom-in" class="mg-zoom-btn" type="button" aria-label="放大">+</button>
+          <span id="mg-result-zoom" class="mg-zoom-level">100%</span>
+          <button id="mg-result-zoom-out" class="mg-zoom-btn" type="button" aria-label="缩小">−</button>
+          <button id="mg-result-zoom-fit" class="mg-zoom-btn" type="button" aria-label="适应窗口" title="适应窗口">⤢</button>
+        </div>
+        <div id="mg-result-cursor" class="mg-cursor">px —, —</div>
       </div>
 
       <div id="mg-stats" class="mg-stats">
@@ -112,8 +139,15 @@
       <input id="mg-inc-file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
 
       <div class="mg-canvas-wrap">
-        <canvas id="mg-inc-canvas" class="mg-canvas" width="512" height="512"></canvas>
-        <div id="mg-inc-hint" class="mg-canvas-hint">在新图上点一下世界原点 (0,0)</div>
+        <canvas id="mg-inc-canvas" class="mg-canvas" width="512" height="512" tabindex="0"></canvas>
+        <div id="mg-inc-hint" class="mg-canvas-hint">滚轮缩放 / 拖动平移 · 在新图上点一下世界原点 (0,0)</div>
+        <div class="mg-zoom-panel" role="group" aria-label="新图缩放">
+          <button id="mg-inc-zoom-in" class="mg-zoom-btn" type="button" aria-label="放大">+</button>
+          <span id="mg-inc-zoom" class="mg-zoom-level">100%</span>
+          <button id="mg-inc-zoom-out" class="mg-zoom-btn" type="button" aria-label="缩小">−</button>
+          <button id="mg-inc-zoom-fit" class="mg-zoom-btn" type="button" aria-label="适应窗口" title="适应窗口">⤢</button>
+        </div>
+        <div id="mg-inc-cursor" class="mg-cursor">px —, —</div>
       </div>
 
       <div class="mg-controls">
@@ -125,6 +159,19 @@
           <input id="mg-inc-ppb" type="number" step="any" min="0.001" value="1">
         </label>
         <span id="mg-inc-cal" class="mg-cal">—</span>
+      </div>
+
+      <div class="mg-controls mg-origin-row">
+        <span class="mg-origin-label">原点像素</span>
+        <input id="mg-inc-ox" class="mg-origin-input" type="number" step="1" placeholder="x" title="世界 (0,0) 在该图上的像素 X">
+        <input id="mg-inc-oy" class="mg-origin-input" type="number" step="1" placeholder="y" title="世界 (0,0) 在该图上的像素 Y">
+        <span class="mg-nudge" role="group" aria-label="微调原点">
+          <button type="button" data-nudge="incoming:-1:0" title="左移 1 像素">←</button>
+          <button type="button" data-nudge="incoming:0:-1" title="上移 1 像素">↑</button>
+          <button type="button" data-nudge="incoming:0:1" title="下移 1 像素">↓</button>
+          <button type="button" data-nudge="incoming:1:0" title="右移 1 像素">→</button>
+        </span>
+        <span class="mg-origin-hint">可直接输入数字精确设置，或用方向键微调</span>
       </div>
     </section>
   </main>

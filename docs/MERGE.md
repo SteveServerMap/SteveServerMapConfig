@@ -114,6 +114,13 @@ export function renderOverlay({ analysis, colors = { 2: 'rgba(90,210,111,.55)', 
      └ #mg-save-name（保存文件名，默认 = 目标图文件名）
 ```
 
+**对齐用的交互（v2，2026-11）**
+
+- 两个 canvas 都是可缩放/平移的视图器：滚轮以光标为锚点缩放、拖拽平移、双击放大、右上角 `+/−/适应` 按钮、键盘 `+/-` 与方向键平移；右下角实时显示**图片像素**坐标（`px 1792, 2563`）。
+- 拾取 (0,0) 之后会自动把该点居中放大到 600%，方便继续微调。
+- 原点除了点画布，还可以**直接输入像素数字**（`#mg-base-ox/oy`、`#mg-inc-ox/oy`），或用 **← ↑ ↓ →** 按钮（`[data-nudge]`）挪 1 像素 —— 避免「凭感觉点」。
+- 改「每方块像素数」会**立即按当前原点重算**画幅。
+
 `merge-ui.js` 导出：
 
 ```js
@@ -124,6 +131,8 @@ export class MergeUI {
     onParamsChange({ tileSize, voidLuminance, diffThreshold }),
     onOptionChange({ fillNew, updateChanged }),
     onAction(name),                          // analyze / apply / download / save / back
+    onOriginChange(which, {px,py}),          // 原点像素被改动（输入框 / 微调按钮）
+    onPpbChange(which, pxPerBlock),          // 每方块像素数被改动
   })
   setStatus(text, tone)
   setBaseImage({ imageBitmapOrImage, width, height, calibration })  // 画到左画布

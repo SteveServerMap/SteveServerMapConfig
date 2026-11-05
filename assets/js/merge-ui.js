@@ -1,24 +1,347 @@
 /**
  * merge-ui.js —— 地图合并页面的界面层
  *
- * 只做三件事：
- *   1. 把两张图 + 合并结果画到 3 个 canvas 上（letterbox 居中，点击换算成图片原始像素）；
- *   2. 把统计/校准/状态/提示写到既有 DOM 节点；
- *   3. 把用户操作通过回调交给 merge.js（控制器），自己不发网络请求、不做算法。
+ * 三个 canvas（目标图 / 新图 / 合并结果）共用一个小型视图器 CanvasView：
+ *   · 滚轮以光标为锚点缩放、拖拽平移、双击放大、按钮 +/−/适应、键盘 +/- 与方向键平移；
+ *   · 画布右下角实时显示「图片像素」坐标，配合缩放可以精确到 1 像素；
+ *   · 原点还可以直接输入数字，或用方向键 / 微调按钮挪 1 像素 —— 不用凭感觉点。
  *
- * DOM 全部来自 merge.html（Lead 拥有），这里只按 id 取用。
+ * 本模块只负责显示与交互，不做算法，也不发网络请求。
  */
 
 const $ = (id) => document.getElementById(id);
 
-/** 把 RGBA 数组画到 canvas（自动按需设置 canvas 尺寸） */
-function putRGBA(canvas, data, width, height) {
-  if (!canvas || !data || !width || !height) return;
-  if (canvas.width !== width) canvas.width = width;
-  if (canvas.height !== height) canvas.height = height;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  const imgData = new ImageData(new Uint8ClampedArray(data), width, height);
-  ctx.putImageData(imgData, 0, 0);
+const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+
+/** 单张图片的缩放/平移视图器 */
+class CanvasView {
+  constructor(canvas, { onPick = null, onHover = null, onZoom = null, allowPick = true } = {}) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d', { willReadFrequently: true });
+    this.onPick = onPick;
+    this.onHover = onHover;
+    this.onZoom = onZoom;
+    this.allowPick = allowPick;
+
+    this.image = null;
+    this.width = 0;
+    this.height = 0;
+    this.scale = 1;
+    this.tx = 0;
+    this.ty = 0;
+    this.minScale = 0.01;
+    this.maxScale = 40;
+    this.pick = null;
+    this.overlay = null;
+    this.cursor = null;
+    this.userAdjusted = false;
+    this.dpr = 1;
+    this._drag = null;
+
+    this._bind();
+    this._observeSize();
+  }
+
+  _bind() {
+    const canvas = this.canvas;
+
+    canvas.addEventListener('wheel', (event) => {
+      if (!this.image) return;
+      event.preventDefault();
+      this.zoomAt(Math.exp(-event.deltaY * 0.0016), this._localPoint(event));
+    }, { passive: false });
+
+    canvas.addEventListener('pointerdown', (event) => {
+      if (!this.image) return;
+      canvas.setPointerCapture?.(event.pointerId);
+      this._drag = {
+        id: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        moved: false,
+        startTx: this.tx,
+        startTy: this.ty,
+      };
+      canvas.style.cursor = 'grabbing';
+    });
+
+    canvas.addEventListener('pointermove', (event) => {
+      const local = this._localPoint(event);
+      this.cursor = local;
+      if (this._drag && this._drag.id === event.pointerId) {
+        const dx = event.clientX - this._drag.x;
+        const dy = event.clientY - this._drag.y;
+        if (!this._drag.moved && Math.hypot(dx, dy) > 3) this._drag.moved = true;
+        if (this._drag.moved) {
+          this.tx = this._drag.startTx + dx;
+          this.ty = this._drag.startTy + dy;
+          this.userAdjusted = true;
+          this.draw();
+        }
+        return;
+      }
+      this.draw();
+      this.onHover?.(this.toImagePoint(local));
+    });
+
+    const endDrag = (event) => {
+      if (!this._drag || this._drag.id !== event.pointerId) return;
+      const drag = this._drag;
+      this._drag = null;
+      canvas.style.cursor = this.allowPick ? 'crosshair' : 'grab';
+      if (!drag.moved) {
+        const local = this._localPoint(event);
+        this.onPick?.(this.toImagePoint(local), local);
+      }
+      this.draw();
+    };
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', () => {
+      this._drag = null;
+      canvas.style.cursor = this.allowPick ? 'crosshair' : 'grab';
+    });
+    canvas.addEventListener('pointerleave', () => {
+      this.cursor = null;
+      this.draw();
+      this.onHover?.(null);
+    });
+
+    canvas.addEventListener('dblclick', (event) => {
+      if (!this.image) return;
+      event.preventDefault();
+      this.zoomAt(1.6, this._localPoint(event));
+    });
+
+    canvas.addEventListener('keydown', (event) => {
+      if (!this.image) return;
+      const step = 24;
+      const center = { x: canvas.clientWidth / 2, y: canvas.clientHeight / 2 };
+      switch (event.key) {
+        case '+':
+        case '=':
+          event.preventDefault();
+          this.zoomAt(1.25, center);
+          break;
+        case '-':
+        case '_':
+          event.preventDefault();
+          this.zoomAt(1 / 1.25, center);
+          break;
+        case 'ArrowLeft':
+          event.preventDefault();
+          this.tx -= step;
+          this.userAdjusted = true;
+          this.draw();
+          break;
+        case 'ArrowRight':
+          event.preventDefault();
+          this.tx += step;
+          this.userAdjusted = true;
+          this.draw();
+          break;
+        case 'ArrowUp':
+          event.preventDefault();
+          this.ty -= step;
+          this.userAdjusted = true;
+          this.draw();
+          break;
+        case 'ArrowDown':
+          event.preventDefault();
+          this.ty += step;
+          this.userAdjusted = true;
+          this.draw();
+          break;
+        default:
+          break;
+      }
+    });
+  }
+
+  _observeSize() {
+    const sync = () => {
+      const rect = this.canvas.getBoundingClientRect();
+      const dpr = clamp(window.devicePixelRatio || 1, 1, 2);
+      const w = Math.max(1, Math.round(rect.width * dpr));
+      const h = Math.max(1, Math.round(rect.height * dpr));
+      if (this.canvas.width !== w) this.canvas.width = w;
+      if (this.canvas.height !== h) this.canvas.height = h;
+      this.dpr = dpr;
+      if (this.image && !this.userAdjusted) this.fit();
+      else this.draw();
+    };
+    if (typeof ResizeObserver === 'function') {
+      this._ro = new ResizeObserver(sync);
+      this._ro.observe(this.canvas);
+    }
+    requestAnimationFrame(sync);
+  }
+
+  _localPoint(event) {
+    const rect = this.canvas.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+
+  /* ------------------------------ 变换 ------------------------------ */
+
+  setImage(image, width, height) {
+    this.image = image || null;
+    this.width = width || 0;
+    this.height = height || 0;
+    this.userAdjusted = false;
+    if (this.image) {
+      this.fit();
+      this.canvas.style.cursor = this.allowPick ? 'crosshair' : 'grab';
+    } else {
+      this.pick = null;
+      this.overlay = null;
+      this.draw();
+      this.canvas.style.cursor = 'default';
+    }
+  }
+
+  fit() {
+    const cw = this.canvas.clientWidth || this.canvas.width || 1;
+    const ch = this.canvas.clientHeight || this.canvas.height || 1;
+    if (!this.width || !this.height) {
+      this.draw();
+      return;
+    }
+    const pad = 10;
+    const scale = Math.min((cw - pad * 2) / this.width, (ch - pad * 2) / this.height);
+    this.scale = clamp(scale, this.minScale, this.maxScale);
+    this.tx = (cw - this.width * this.scale) / 2;
+    this.ty = (ch - this.height * this.scale) / 2;
+    this.userAdjusted = false;
+    this.draw();
+    this.onZoom?.(this.scale);
+  }
+
+  zoomAt(factor, point) {
+    const anchor = point || { x: this.canvas.clientWidth / 2, y: this.canvas.clientHeight / 2 };
+    const next = clamp(this.scale * factor, this.minScale, this.maxScale);
+    if (next === this.scale) return;
+    const ratio = next / this.scale;
+    this.tx = anchor.x - (anchor.x - this.tx) * ratio;
+    this.ty = anchor.y - (anchor.y - this.ty) * ratio;
+    this.scale = next;
+    this.userAdjusted = true;
+    this.draw();
+    this.onZoom?.(this.scale);
+  }
+
+  zoomBy(factor) {
+    const cw = this.canvas.clientWidth || 1;
+    const ch = this.canvas.clientHeight || 1;
+    this.zoomAt(factor, this.cursor || { x: cw / 2, y: ch / 2 });
+  }
+
+  /** 让某个图片像素居中并（可选）设成指定比例 */
+  focusPixel(px, py, scale = null) {
+    const cw = this.canvas.clientWidth || 1;
+    const ch = this.canvas.clientHeight || 1;
+    if (scale && scale > 0) this.scale = clamp(scale, this.minScale, this.maxScale);
+    this.tx = cw / 2 - px * this.scale;
+    this.ty = ch / 2 - py * this.scale;
+    this.userAdjusted = true;
+    this.draw();
+    this.onZoom?.(this.scale);
+  }
+
+  toImagePoint(local) {
+    if (!local || !(this.scale > 0)) return { px: NaN, py: NaN };
+    return { px: (local.x - this.tx) / this.scale, py: (local.y - this.ty) / this.scale };
+  }
+
+  setPick(point) {
+    this.pick = point && Number.isFinite(point.px) ? { px: point.px, py: point.py } : null;
+    this.draw();
+  }
+
+  setOverlay(overlay) {
+    this.overlay = overlay || null;
+    this.draw();
+  }
+
+  /* ------------------------------ 绘制 ------------------------------ */
+
+  draw() {
+    const ctx = this.ctx;
+    const cw = this.canvas.clientWidth || this.canvas.width / this.dpr || 1;
+    const ch = this.canvas.clientHeight || this.canvas.height / this.dpr || 1;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+
+    if (!this.image) {
+      const size = 14;
+      for (let y = 0; y < ch; y += size) {
+        for (let x = 0; x < cw; x += size) {
+          ctx.fillStyle = ((x / size + y / size) % 2 === 0) ? '#0e130f' : '#0a0d0b';
+          ctx.fillRect(x, y, size, size);
+        }
+      }
+      return;
+    }
+
+    ctx.imageSmoothingEnabled = this.scale < 1;
+    ctx.drawImage(this.image, this.tx, this.ty, this.width * this.scale, this.height * this.scale);
+
+    if (this.overlay) {
+      const { map, cols, rows, tileSize } = this.overlay;
+      const colors = { 2: 'rgba(90,210,111,.55)', 3: 'rgba(255,188,75,.55)' };
+      for (let ty = 0; ty < rows; ty += 1) {
+        for (let tx = 0; tx < cols; tx += 1) {
+          const color = colors[map[ty * cols + tx]];
+          if (!color) continue;
+          ctx.fillStyle = color;
+          ctx.fillRect(
+            this.tx + tx * tileSize * this.scale,
+            this.ty + ty * tileSize * this.scale,
+            tileSize * this.scale,
+            tileSize * this.scale,
+          );
+        }
+      }
+    }
+
+    if (this.pick) {
+      const x = this.tx + this.pick.px * this.scale;
+      const y = this.ty + this.pick.py * this.scale;
+      ctx.save();
+      ctx.strokeStyle = '#5ad26f';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x - 14, y);
+      ctx.lineTo(x + 14, y);
+      ctx.moveTo(x, y - 14);
+      ctx.lineTo(x, y + 14);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(90,210,111,.95)';
+      ctx.font = '12px ui-monospace, Consolas, monospace';
+      ctx.fillText(`(0,0) px ${Math.round(this.pick.px)}, ${Math.round(this.pick.py)}`, x + 10, y - 10);
+      ctx.restore();
+    }
+
+    if (this.cursor) {
+      const { x, y } = this.cursor;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(200,220,205,.32)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(x) + 0.5, 0);
+      ctx.lineTo(Math.round(x) + 0.5, ch);
+      ctx.moveTo(0, Math.round(y) + 0.5);
+      ctx.lineTo(cw, Math.round(y) + 0.5);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  destroy() {
+    this._ro?.disconnect();
+  }
 }
 
 export class MergeUI {
@@ -30,20 +353,37 @@ export class MergeUI {
     onParamsChange = null,
     onOptionChange = null,
     onAction = null,
+    onOriginChange = null,
+    onPpbChange = null,
   } = {}) {
     this.root = rootEl || document;
-    this.callbacks = { onPickBase, onPickIncoming, onBaseImage, onIncomingImage, onParamsChange, onOptionChange, onAction };
+    this.callbacks = {
+      onPickBase, onPickIncoming, onBaseImage, onIncomingImage,
+      onParamsChange, onOptionChange, onAction, onOriginChange, onPpbChange,
+    };
 
-    /** @type {{image:HTMLImageElement|null,width:number,height:number,scale:number,offsetX:number,offsetY:number}} */
-    this.base = { image: null, width: 0, height: 0, scale: 1, offsetX: 0, offsetY: 0 };
-    this.incoming = { image: null, width: 0, height: 0, scale: 1, offsetX: 0, offsetY: 0 };
-    this.baseCal = null;
-    this.incomingCal = null;
-    this.picks = { base: null, incoming: null };
-    this.pickMode = null; // 'base' | 'incoming' | null
+    this.pickMode = null;
     this.analysis = null;
     this.merged = null;
     this.busy = false;
+    this.baseCal = null;
+    this.incomingCal = null;
+
+    this.baseView = new CanvasView($('mg-base-canvas'), {
+      onPick: (point) => this._handleCanvasPick('base', point),
+      onHover: (point) => this._updateCursorText('base', point),
+      onZoom: (scale) => this._updateZoomText('base', scale),
+    });
+    this.incomingView = new CanvasView($('mg-inc-canvas'), {
+      onPick: (point) => this._handleCanvasPick('incoming', point),
+      onHover: (point) => this._updateCursorText('incoming', point),
+      onZoom: (scale) => this._updateZoomText('incoming', scale),
+    });
+    this.resultView = new CanvasView($('mg-result-canvas'), {
+      onHover: (point) => this._updateCursorText('result', point),
+      onZoom: (scale) => this._updateZoomText('result', scale),
+      allowPick: false,
+    });
 
     this._bind();
     this._bindDrop('mg-base-drop', 'mg-base-file', 'base');
@@ -68,18 +408,67 @@ export class MergeUI {
     $('mg-base-pick')?.addEventListener('click', () => this._togglePick('base'));
     $('mg-inc-pick')?.addEventListener('click', () => this._togglePick('incoming'));
 
-    $('mg-base-canvas')?.addEventListener('click', (event) => this._handleCanvasClick('base', event));
-    $('mg-inc-canvas')?.addEventListener('click', (event) => this._handleCanvasClick('incoming', event));
+    for (const [side, view] of [['base', this.baseView], ['incoming', this.incomingView], ['result', this.resultView]]) {
+      const prefix = side === 'incoming' ? 'mg-inc' : side === 'base' ? 'mg-base' : 'mg-result';
+      $(`${prefix}-zoom-in`)?.addEventListener('click', () => view.zoomBy(1.35));
+      $(`${prefix}-zoom-out`)?.addEventListener('click', () => view.zoomBy(1 / 1.35));
+      $(`${prefix}-zoom-fit`)?.addEventListener('click', () => view.fit());
+    }
 
-    for (const [id, key] of [['mg-tile-size', 'tileSize'], ['mg-void-lum', 'voidLuminance'], ['mg-diff-thr', 'diffThreshold']]) {
+    for (const side of ['base', 'incoming']) {
+      const prefix = side === 'base' ? 'mg-base' : 'mg-inc';
+      const fire = () => {
+        const ox = Number($(`${prefix}-ox`)?.value);
+        const oy = Number($(`${prefix}-oy`)?.value);
+        if (Number.isFinite(ox) && Number.isFinite(oy)) this.callbacks.onOriginChange?.(side, { px: ox, py: oy });
+      };
+      $(`${prefix}-ox`)?.addEventListener('change', fire);
+      $(`${prefix}-oy`)?.addEventListener('change', fire);
+      $(`${prefix}-ppb`)?.addEventListener('change', () => {
+        this.callbacks.onPpbChange?.(side, Number($(`${prefix}-ppb`)?.value));
+      });
+    }
+
+    for (const btn of document.querySelectorAll('[data-nudge]')) {
+      btn.addEventListener('click', () => {
+        const [side, dx, dy] = String(btn.dataset.nudge).split(':');
+        this._nudgeOrigin(side, Number(dx), Number(dy));
+      });
+    }
+
+    // 焦点在图上时 Alt+方向键 = 微调原点 1 像素
+    for (const [side, canvas] of [['base', $('mg-base-canvas')], ['incoming', $('mg-inc-canvas')]]) {
+      canvas?.addEventListener('keydown', (event) => {
+        if (!event.altKey) return;
+        const map = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+        const delta = map[event.key];
+        if (!delta) return;
+        event.preventDefault();
+        this._nudgeOrigin(side, delta[0], delta[1]);
+      });
+    }
+
+    for (const id of ['mg-tile-size', 'mg-void-lum', 'mg-diff-thr']) {
       $(id)?.addEventListener('change', () => this.callbacks.onParamsChange?.(this.getParams()));
       $(id)?.addEventListener('input', () => this.callbacks.onParamsChange?.(this.getParams()));
-      void key;
     }
-    for (const [id, key] of [['mg-opt-fill', 'fillNew'], ['mg-opt-update', 'updateChanged']]) {
+    for (const id of ['mg-opt-fill', 'mg-opt-update']) {
       $(id)?.addEventListener('change', () => this.callbacks.onOptionChange?.(this.getOptions()));
-      void key;
     }
+  }
+
+  _nudgeOrigin(side, dx, dy) {
+    const view = side === 'base' ? this.baseView : this.incomingView;
+    const prefix = side === 'base' ? 'mg-base' : 'mg-inc';
+    const pick = view.pick || {
+      px: Number($(`${prefix}-ox`)?.value),
+      py: Number($(`${prefix}-oy`)?.value),
+    };
+    if (!Number.isFinite(pick.px) || !Number.isFinite(pick.py)) {
+      this.setStatus('先拾取一次原点（或在「原点像素」里填数字），再用方向键微调', 'warn');
+      return;
+    }
+    this.callbacks.onOriginChange?.(side, { px: Math.round(pick.px) + dx, py: Math.round(pick.py) + dy });
   }
 
   _bindDrop(dropId, inputId, which) {
@@ -121,34 +510,24 @@ export class MergeUI {
     });
   }
 
-  _handleCanvasClick(which, event) {
-    const side = which === 'base' ? this.base : this.incoming;
-    if (!side.image) return;
-    const canvas = $(which === 'base' ? 'mg-base-canvas' : 'mg-inc-canvas');
-    const rect = canvas.getBoundingClientRect();
-    // 画布 CSS 尺寸可能被缩放：换算回 canvas 像素坐标
-    const cssScaleX = canvas.width / Math.max(1, rect.width);
-    const cssScaleY = canvas.height / Math.max(1, rect.height);
-    const canvasX = (event.clientX - rect.left) * cssScaleX;
-    const canvasY = (event.clientY - rect.top) * cssScaleY;
-    const px = (canvasX - side.offsetX) / (side.scale || 1);
-    const py = (canvasY - side.offsetY) / (side.scale || 1);
-    if (!(px >= 0 && px <= side.width && py >= 0 && py <= side.height)) {
-      this.setStatus('点在图片外面了，请点在图片区域内', 'warn');
-      return;
-    }
+  _handleCanvasPick(which, point) {
+    if (!point || !Number.isFinite(point.px)) return;
     if (this.pickMode === which) {
       this._setPickMode(null);
-      if (which === 'base') this.callbacks.onPickBase?.({ px, py });
-      else this.callbacks.onPickIncoming?.({ px, py });
+      const rounded = { px: Math.round(point.px), py: Math.round(point.py) };
+      if (which === 'base') this.callbacks.onPickBase?.(rounded);
+      else this.callbacks.onPickIncoming?.(rounded);
       return;
     }
-    // 非拾取模式下点击 = 报告当前位置（便于微调，不改变任何状态）
-    this.setStatus(`图片像素 (${Math.round(px)}, ${Math.round(py)})`, 'info');
+    this.setStatus(
+      `图片像素 (${Math.round(point.px)}, ${Math.round(point.py)}) —— 点「拾取 (0,0)」把它设为世界原点，或直接填右下角数字`,
+      'info',
+    );
   }
 
   _togglePick(which) {
-    if (!(which === 'base' ? this.base.image : this.incoming.image)) {
+    const view = which === 'base' ? this.baseView : this.incomingView;
+    if (!view.image) {
       this.setStatus(`先载入${which === 'base' ? '目标图' : '新图'}`, 'warn');
       return;
     }
@@ -159,99 +538,37 @@ export class MergeUI {
     this.pickMode = which;
     for (const side of ['base', 'incoming']) {
       const btn = $(side === 'base' ? 'mg-base-pick' : 'mg-inc-pick');
-      const canvas = $(side === 'base' ? 'mg-base-canvas' : 'mg-inc-canvas');
       const hint = $(side === 'base' ? 'mg-base-hint' : 'mg-inc-hint');
       const active = which === side;
       btn?.classList.toggle('is-active', active);
       btn?.setAttribute('aria-pressed', active ? 'true' : 'false');
-      if (canvas) canvas.style.cursor = active ? 'crosshair' : 'default';
       if (hint) {
         hint.hidden = !active;
-        if (active) hint.textContent = '点击图片上世界 (0,0) 的位置（Esc 取消）';
+        if (active) hint.textContent = '点击图片上世界 (0,0) 的位置（Esc 取消）· 可先滚轮放大到像素级';
       }
     }
-    if (which) this.setStatus(`拾取模式：在${which === 'base' ? '目标图' : '新图'}上点一下世界 (0,0) 的位置`, 'warn');
+    if (which) this.setStatus(`拾取模式：在${which === 'base' ? '目标图' : '新图'}上点一下世界 (0,0)（先滚轮放大更准）`, 'warn');
     else this.setStatus('已退出拾取模式', 'info');
   }
 
-  /* ------------------------------ 绘制 ------------------------------ */
+  /* ------------------------------ 文本 ------------------------------ */
 
-  _drawSide(which) {
-    const side = which === 'base' ? this.base : this.incoming;
-    const canvas = $(which === 'base' ? 'mg-base-canvas' : 'mg-inc-canvas');
-    const hint = $(which === 'base' ? 'mg-base-hint' : 'mg-inc-hint');
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (!side.image) {
-      // 占位：深色棋盘
-      const size = 16;
-      for (let y = 0; y < canvas.height; y += size) {
-        for (let x = 0; x < canvas.width; x += size) {
-          ctx.fillStyle = ((x / size + y / size) % 2 === 0) ? '#0e130f' : '#0a0d0b';
-          ctx.fillRect(x, y, size, size);
-        }
-      }
-      if (hint) hint.hidden = false;
+  _updateCursorText(side, point) {
+    const prefix = side === 'base' ? 'mg-base' : side === 'incoming' ? 'mg-inc' : 'mg-result';
+    const el = $(`${prefix}-cursor`);
+    if (!el) return;
+    if (!point || !Number.isFinite(point.px)) {
+      el.textContent = 'px —, —';
       return;
     }
-    if (hint) hint.hidden = true;
-
-    const scale = Math.min(canvas.width / side.width, canvas.height / side.height);
-    side.scale = scale;
-    side.offsetX = (canvas.width - side.width * scale) / 2;
-    side.offsetY = (canvas.height - side.height * scale) / 2;
-    ctx.imageSmoothingEnabled = scale < 1;
-    ctx.drawImage(side.image, side.offsetX, side.offsetY, side.width * scale, side.height * scale);
-
-    // 目标图上叠加差异色块（只有在还没有合并结果时）
-    if (which === 'base' && this.analysis && !this.merged) {
-      this._drawAnalysisOverlay(ctx, side);
-    }
-
-    // 拾取标记
-    const pick = this.picks[which];
-    if (pick && Number.isFinite(pick.px)) {
-      const x = side.offsetX + pick.px * side.scale;
-      const y = side.offsetY + pick.py * side.scale;
-      ctx.save();
-      ctx.strokeStyle = '#5ad26f';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(x - 12, y);
-      ctx.lineTo(x + 12, y);
-      ctx.moveTo(x, y - 12);
-      ctx.lineTo(x, y + 12);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(x, y, 4, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(90,210,111,.9)';
-      ctx.font = '12px ui-monospace, Consolas, monospace';
-      ctx.fillText('(0,0)', x + 8, y - 8);
-      ctx.restore();
-    }
+    const inside = point.px >= 0 && point.py >= 0;
+    el.textContent = `px ${Math.round(point.px)}, ${Math.round(point.py)}${inside ? '' : '（图外）'}`;
   }
 
-  _drawAnalysisOverlay(ctx, side) {
-    const a = this.analysis;
-    const tile = a.tileSize;
-    const colors = { 1: null, 2: 'rgba(90,210,111,.55)', 3: 'rgba(255,188,75,.55)' };
-    ctx.save();
-    for (let ty = 0; ty < a.rows; ty += 1) {
-      for (let tx = 0; tx < a.cols; tx += 1) {
-        const cls = a.map[ty * a.cols + tx];
-        const color = colors[cls];
-        if (!color) continue;
-        const x = side.offsetX + tx * tile * side.scale;
-        const y = side.offsetY + ty * tile * side.scale;
-        ctx.fillStyle = color;
-        ctx.fillRect(x, y, tile * side.scale, tile * side.scale);
-      }
-    }
-    ctx.restore();
+  _updateZoomText(side, scale) {
+    const prefix = side === 'base' ? 'mg-base' : side === 'incoming' ? 'mg-inc' : 'mg-result';
+    const el = $(`${prefix}-zoom`);
+    if (el) el.textContent = `${Math.round((scale || 0) * 100)}%`;
   }
 
   /* ------------------------------ 对外 API ------------------------------ */
@@ -280,24 +597,34 @@ export class MergeUI {
     }, duration);
   }
 
-  setBaseImage({ image, width, height, calibration = null, label = '' } = {}) {
-    this.base = { ...this.base, image: image || null, width: width || 0, height: height || 0 };
-    this.baseCal = calibration;
+  setBaseImage({ image, width, height, calibration = null, label = '', origin = null } = {}) {
+    this.baseView.setImage(image || null, width || 0, height || 0);
+    this.baseCal = calibration || null;
     const meta = $('mg-base-meta');
     if (meta) meta.textContent = image ? `${width}×${height}px${label ? ` · ${label}` : ''}` : '未载入';
+    if (origin) this._reflectOrigin('base', origin);
     this._updateCalText('base');
-    this._drawSide('base');
-    this.setStatus(image ? '目标图已载入' : '未载入目标图', image ? 'ok' : 'info');
+    this._updateZoomText('base', this.baseView.scale);
+    this.setStatus(image ? '目标图已载入（滚轮缩放 / 拖动平移）' : '未载入目标图', image ? 'ok' : 'info');
   }
 
-  setIncomingImage({ image, width, height, calibration = null, label = '' } = {}) {
-    this.incoming = { ...this.incoming, image: image || null, width: width || 0, height: height || 0 };
-    this.incomingCal = calibration;
+  setIncomingImage({ image, width, height, calibration = null, label = '', origin = null } = {}) {
+    this.incomingView.setImage(image || null, width || 0, height || 0);
+    this.incomingCal = calibration || null;
     const meta = $('mg-inc-meta');
     if (meta) meta.textContent = image ? `${width}×${height}px${label ? ` · ${label}` : ''}` : '未载入';
+    if (origin) this._reflectOrigin('incoming', origin);
     this._updateCalText('incoming');
-    this._drawSide('incoming');
-    if (image) this.setStatus('新图已载入，接下来在新图上点一下世界 (0,0)', 'ok');
+    this._updateZoomText('incoming', this.incomingView.scale);
+    if (image) this.setStatus('新图已载入：可先用滚轮放大到能看到方块边界，再拾取 (0,0)', 'ok');
+  }
+
+  _reflectOrigin(side, { px, py }) {
+    const prefix = side === 'base' ? 'mg-base' : 'mg-inc';
+    const ox = $(`${prefix}-ox`);
+    const oy = $(`${prefix}-oy`);
+    if (ox) ox.value = String(Math.round(px));
+    if (oy) oy.value = String(Math.round(py));
   }
 
   _updateCalText(which) {
@@ -313,30 +640,38 @@ export class MergeUI {
   }
 
   setPickMarker(which, point) {
-    if (which === 'base') this.picks.base = point || null;
-    else this.picks.incoming = point || null;
-    this._drawSide(which);
+    const view = which === 'base' ? this.baseView : this.incomingView;
+    view.setPick(point || null);
+    if (point) this._reflectOrigin(which, point);
     this._updateCalText(which);
+  }
+
+  /** 把拾取点居中并放大到能看清像素的级别（供控制器在拾取后调用） */
+  focusOrigin(which, scale = 6) {
+    const view = which === 'base' ? this.baseView : this.incomingView;
+    if (!view.pick) return;
+    view.focusPixel(view.pick.px + 0.5, view.pick.py + 0.5, scale);
   }
 
   setAnalysis(analysis) {
     this.analysis = analysis || null;
     this.merged = null;
+    this.baseView.setOverlay(
+      analysis ? { map: analysis.map, cols: analysis.cols, rows: analysis.rows, tileSize: analysis.tileSize } : null,
+    );
     const stats = $('mg-stats');
     if (stats) {
       const cells = stats.querySelectorAll('.mg-stat');
+      const setCell = (i, value) => {
+        const b = cells[i]?.querySelector('b');
+        if (b) b.textContent = String(value);
+      };
       if (cells.length >= 4) {
-        const setCell = (i, value, unit) => {
-          const b = cells[i].querySelector('b');
-          const span = cells[i].querySelector('span');
-          if (b) b.textContent = String(value);
-          if (span && unit) span.textContent = unit;
-        };
-        setCell(0, analysis ? analysis.counts.onlyIncoming : '—', '新增');
-        setCell(1, analysis ? analysis.counts.changed : '—', '变更');
-        setCell(2, analysis ? analysis.counts.onlyBase : '—', '仅目标图');
+        setCell(0, analysis ? analysis.counts.onlyIncoming : '—');
+        setCell(1, analysis ? analysis.counts.changed : '—');
+        setCell(2, analysis ? analysis.counts.onlyBase : '—');
         const area = analysis ? Math.round(analysis.blocksArea.onlyIncoming + analysis.blocksArea.changed) : null;
-        setCell(3, area == null ? '—' : area.toLocaleString('zh-CN'), '方块²');
+        setCell(3, area == null ? '—' : area.toLocaleString('zh-CN'));
       }
     }
     const hint = $('mg-result-hint');
@@ -347,7 +682,6 @@ export class MergeUI {
         'ok',
       );
     }
-    this._drawSide('base');
     this._syncButtons();
   }
 
@@ -355,22 +689,20 @@ export class MergeUI {
     const { data, width, height } = payload || {};
     if (!data) {
       this.merged = null;
-      const canvas = $('mg-result-canvas');
-      if (canvas) {
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-      }
+      this.resultView.setImage(null, 0, 0);
       const hint = $('mg-result-hint');
       if (hint) hint.hidden = false;
       this._syncButtons();
       return;
     }
     this.merged = { width, height };
-    putRGBA($('mg-result-canvas'), data, width, height);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(data), width, height), 0, 0);
+    this.resultView.setImage(canvas, width, height);
     const hint = $('mg-result-hint');
     if (hint) hint.hidden = true;
-    // 合并后 target 图上的差异叠加层就不需要了
-    this._drawSide('base');
     this._syncButtons();
   }
 
@@ -413,17 +745,12 @@ export class MergeUI {
   _syncButtons() {
     const hasAnalysis = !!this.analysis;
     const hasMerged = !!this.merged;
-    const apply = $('mg-apply');
-    const download = $('mg-download');
-    const save = $('mg-save');
-    if (apply) apply.disabled = this.busy || !hasAnalysis;
-    if (download) download.disabled = this.busy || !hasMerged;
-    if (save) save.disabled = this.busy || !hasMerged;
-    const analyze = $('mg-analyze');
-    if (analyze) analyze.disabled = this.busy || !(this.base.image && this.incoming.image);
+    if ($('mg-apply')) $('mg-apply').disabled = this.busy || !hasAnalysis;
+    if ($('mg-download')) $('mg-download').disabled = this.busy || !hasMerged;
+    if ($('mg-save')) $('mg-save').disabled = this.busy || !hasMerged;
+    if ($('mg-analyze')) $('mg-analyze').disabled = this.busy || !(this.baseView.image && this.incomingView.image);
   }
 
-  /** 退出拾取模式（Esc 用） */
   cancelPick() {
     if (this.pickMode) this._setPickMode(null);
   }
@@ -432,14 +759,17 @@ export class MergeUI {
     return this.pickMode;
   }
 
-  /** 让控制器也能刷新画布（例如改变缩放后） */
   redraw() {
-    this._drawSide('base');
-    this._drawSide('incoming');
+    this.baseView.draw();
+    this.incomingView.draw();
+    this.resultView.draw();
   }
 
   destroy() {
     clearTimeout(this._toastTimer);
+    this.baseView.destroy();
+    this.incomingView.destroy();
+    this.resultView.destroy();
   }
 }
 

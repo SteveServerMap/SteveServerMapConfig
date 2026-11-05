@@ -174,10 +174,11 @@ async function main() {
     const merged = await page.evalFn(() => {
       const m = window.__merge.merged;
       if (!m) return null;
-      const canvas = document.getElementById('mg-result-canvas');
-      // 取绿色区域（世界 -80,-80 → 像素 48,48）与红色区域（世界 40,40 → 像素 168,168）的颜色
-      const ctx = canvas.getContext('2d');
-      const sample = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data).slice(0, 3);
+      // 直接采样合并结果的像素数组（结果画布现在带缩放/DPR，用画布坐标采样不可靠）
+      const sample = (x, y) => {
+        const i = (y * m.width + x) * 4;
+        return [m.data[i], m.data[i + 1], m.data[i + 2]];
+      };
       return { width: m.width, height: m.height, applied: m.applied, green: sample(48, 48), red: sample(168, 168) };
     });
     const greenOk = merged && merged.green[1] > 150 && merged.green[0] < 120;
@@ -189,10 +190,12 @@ async function main() {
     await page.evalFn(() => window.__merge.action('apply'));
     await sleep(900);
     const noFill = await page.evalFn(() => {
-      const canvas = document.getElementById('mg-result-canvas');
-      const ctx = canvas.getContext('2d');
-      const sample = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data).slice(0, 3);
-      return { green: sample(48, 48), filled: window.__merge.merged?.applied?.filledTiles ?? null };
+      const m = window.__merge.merged;
+      const sample = (x, y) => {
+        const i = (y * m.width + x) * 4;
+        return [m.data[i], m.data[i + 1], m.data[i + 2]];
+      };
+      return { green: sample(48, 48), filled: m?.applied?.filledTiles ?? null };
     });
     const noFillOk = noFill.filled === 0 && noFill.green[1] < 80;
     check('§4 取消「补空白」后不再补入新增区域', noFillOk, JSON.stringify(noFill));

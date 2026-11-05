@@ -54,6 +54,8 @@ async function bootstrap() {
     onParamsChange: () => markAnalysisStale('分析参数已改，请重新点「分析差异」'),
     onOptionChange: () => recomposeIfPossible(),
     onAction: handleAction,
+    onOriginChange: (which, point) => handleOriginChange(which, point),
+    onPpbChange: (which, ppb) => handlePpbChange(which, ppb),
   });
 
   bindKeyboard();
@@ -169,7 +171,19 @@ function applyBase({ image, width, height, cal, fileName, label }) {
 /* ============================== 拾取原点 ============================== */
 
 function handlePick(which, { px, py }) {
+  handleOriginChange(which, { px, py }, { fromCanvas: true });
+}
+
+/** 统一的「设置原点像素 → 重算校准」入口（画布拾取 / 数字输入 / 方向键微调都走这里） */
+function handleOriginChange(which, point, { fromCanvas = false } = {}) {
   const target = which === 'base' ? state.base : state.incoming;
+  if (!target.image) return;
+  const px = Math.round(Number(point.px));
+  const py = Math.round(Number(point.py));
+  if (!Number.isFinite(px) || !Number.isFinite(py)) {
+    state.ui.setStatus('原点像素必须是数字', 'error');
+    return;
+  }
   const ppbInput = $(which === 'base' ? 'mg-base-ppb' : 'mg-inc-ppb');
   const pxPerBlock = Number(ppbInput.value);
   if (!(pxPerBlock > 0)) {
@@ -196,12 +210,34 @@ function handlePick(which, { px, py }) {
     height: target.height,
     calibration: cal,
     label: which === 'base' ? state.base.label : state.incoming.label,
+    origin: { px, py },
   });
+  // 画布拾取后自动放大到能看清像素的级别，方便继续用 ←↑↓→ 微调
+  if (fromCanvas) state.ui.focusOrigin(which, 6);
   state.ui.setStatus(
-    `${which === 'base' ? '目标图' : '新图'}原点已设置：X ${Math.round(cal.xMin)} → ${Math.round(cal.xMax)} · Z ${Math.round(cal.zMin)} → ${Math.round(cal.zMax)}`,
+    `${which === 'base' ? '目标图' : '新图'}原点 = px(${px}, ${py}) → X ${Math.round(cal.xMin)} → ${Math.round(cal.xMax)} · Z ${Math.round(cal.zMin)} → ${Math.round(cal.zMax)}`,
     'ok',
   );
   invalidateAll();
+}
+
+/** 改「每方块像素数」后，如果已有原点就立即重算校准 */
+function handlePpbChange(which, pxPerBlock) {
+  const target = which === 'base' ? state.base : state.incoming;
+  const prefix = which === 'base' ? 'mg-base' : 'mg-inc';
+  const pick = {
+    px: Number($(`${prefix}-ox`)?.value),
+    py: Number($(`${prefix}-oy`)?.value),
+  };
+  if (!(pxPerBlock > 0)) {
+    state.ui.setStatus('「每方块像素数」要大于 0', 'error');
+    return;
+  }
+  if (!Number.isFinite(pick.px) || !Number.isFinite(pick.py) || !target.image) {
+    state.ui.setStatus('已记录比例；设置原点后会立刻算出画幅', 'info');
+    return;
+  }
+  handleOriginChange(which, pick);
 }
 
 /** 参数/图片变化后，之前的分析与合并结果都作废 */
@@ -542,6 +578,11 @@ window.__merge = {
     });
     invalidateAll();
     return target.cal;
+  },
+  setOriginPx: (which, point) => handleOriginChange(which, point),
+  setPpb: (which, ppb) => {
+    $(which === 'base' ? 'mg-base-ppb' : 'mg-inc-ppb').value = String(ppb);
+    handlePpbChange(which, Number(ppb));
   },
   setSaveName: (name) => state.ui.setSaveName(name),
   getSaveName: () => state.ui.getSaveName(),
