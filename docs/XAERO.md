@@ -196,3 +196,33 @@ node tools/xaero-decode.mjs "<..>/Multiplayer_frp-web.com/null/mw$default" --sca
 
 另外每个维度都有两套数据：`mw$default/*.zip` 是**地面模式**，`mw$default/caves/<layer>/*.zip` 是**洞穴模式**
 （frp-web 主世界：地表 371 个、洞穴 964 个区域）。`caveModeType:1` 只是"启用洞穴层"的开关。
+
+## 9. 用 Xaero 自带导出（推荐路线）
+
+自研解码器的配色是近似的，和游戏里看到的差别较大。**要 1:1 还原就用 Xaero 自己的导出**：
+
+### 导出步骤（游戏内）
+
+1. 把解压出的 `world-map` 目录放进 `.minecraft/XaeroWorldMap/`（保持 `<服务器名>/<维度>/...` 结构）
+2. 进入对应服务器/存档，按 `M` 打开世界地图
+3. 右键拖框选中要导出的范围（或什么都不选，用 **Force Full Map** 导全图）
+4. 右键菜单点 **Export Map as PNG**
+5. 导出界面勾选：
+   - **Multiple Unscaled Images** ← 大范围必备：按 1 px = 1 方块导出成多张，不受单图内存限制
+   - 可选 Force Full Map（忽略选区导全图）、Nighttime（夜景光照）
+6. 导出文件在 `XaeroWorldMap/exports/`（文件名带时间戳 + 坐标后缀）
+
+### 拼接（本仓库工具）
+
+```bash
+node tools/stitch-xaero-export.mjs <导出目录> --out=stitched.png
+```
+
+- 纯 Node、零依赖：自带 PNG 解码/编码
+- **自动识别文件名末尾的两个整数当坐标**（如 `2026-11-05_23.20.00_3_-7.png` → 坐标 (3,-7)），按网格拼
+- 文件名没有坐标时，按自然排序铺开，用 `--cols=N` 指定列数
+- `--scale=N` 可选整数降采样（大图压缩体积）
+
+已验证：4 张带坐标的测试图能正确拼成 2×2 网格、每个象限颜色对位准确。
+
+> 如果 Xaero 导出的文件名里没有坐标，把文件列表发我，我按实际命名规则调整解析。
