@@ -142,6 +142,24 @@ Overlay（方块上的"覆盖层"，如草/雪）的参数位域：
 | -103_-13 | 1 | 10 | 同上（flags 不影响区块数据的起点） |
 | -102_-13 | 7 | 22 | 头 6 + 四个空 tile(16) + … |
 
-**当前进度**：`tools/xaero-decode.mjs` 已实现 zip 解包、NBT 读取、`parametres` 位域、逐方块解出方块 ID 并渲染 PNG；
-卡在**区块存在表/区块头的确切字节数**上（头部之后到第一段内联 NBT 之间还有 10 字节没对上），
-下一步用"自适应布局探测"（尝试 8 字节位图 / 64 字节数组 / 各 int 组合，取能连续解出合法 `minecraft:*` ID 的那种）来定死。
+**当前进度：已打通**（`tools/xaero-decode.mjs` 可以把 region 直接解成 PNG）
+
+关键规则（实测 371 个区域里的多个样本，全部精确读到文件末尾、剩余 0 字节）：
+
+```
+[6 字节头] 0xFF | int(major<<16|minor) | byte flags
+[区块 0]  直接是 16 个 tile（没有标记字节）
+[其后每块] byte((chunkX << 4) | chunkZ) + 16 个 tile
+每个 tile：[空] writeInt(-1)
+           [有] 256 个方块（x 外层 16、z 内层 16） + byte worldInterp + int caveStart + byte caveDepth
+```
+
+用法：
+
+```bash
+node tools/xaero-decode.mjs <.data/xaero/world-map/<世界>/<维度>/mw$default> --out=out.png
+```
+
+实测：单个区域 512×512、0.36 s 解 6 个区域；输出 PNG 里颜色分布合理（砂 6.7%、树叶 6.9%、泥土 10.7%、砂砾 58%、海草 4.4%）。
+
+

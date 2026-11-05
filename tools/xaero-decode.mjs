@@ -276,10 +276,18 @@ function decodeRegionPayload(payload) {
   let tiles = 0;
   let emptyTiles = 0;
 
-  // 区块顺序：外层 x(0..7)，内层 z(0..7)；每个区块 4×4 个 tile（外层 tx，内层 tz）
-  for (let cx = 0; cx < CHUNKS; cx += 1) {
-    for (let cz = 0; cz < CHUNKS; cz += 1) {
-      for (let tx = 0; tx < TILES; tx += 1) {
+  // 区块流：第一个区块没有标记字节，之后每个存在的区块前有 1 字节标记 (chunkX << 4) | chunkZ
+  let cx = 0;
+  let cz = 0;
+  let chunkIndex = 0;
+  while (p < payload.length) {
+    if (chunkIndex > 0) {
+      const marker = u8();
+      cx = (marker >> 4) & 0xf;
+      cz = marker & 0xf;
+    }
+    chunkIndex += 1;
+    for (let tx = 0; tx < TILES; tx += 1) {
         for (let tz = 0; tz < TILES; tz += 1) {
           // 空 tile 只写一个 -1；有数据的 tile 直接就是第一个方块的 parametres
           const firstParametres = i32();
@@ -358,7 +366,6 @@ function decodeRegionPayload(payload) {
           u8();
         }
       }
-    }
   }
 
   return {
@@ -371,6 +378,7 @@ function decodeRegionPayload(payload) {
     pixels,
     tiles,
     emptyTiles,
+    chunks: chunkIndex,
     remaining: payload.length - p,
     blockPalette,
     biomePalette,
@@ -460,7 +468,7 @@ async function main() {
       results.push({ file, result });
       console.log(
         `${path.basename(file)}: v${result.version.major}.${result.version.minor} flags=${result.flags} ` +
-          `tile=${result.tiles}/空=${result.emptyTiles} 调色板=${result.blockPalette.length} 方块=${result.pixels} 剩余字节=${result.remaining}`,
+          `区块=${result.chunks} 非空tile=${result.tiles} 调色板=${result.blockPalette.length} 方块=${result.pixels} 剩余字节=${result.remaining}`,
       );
     } catch (err) {
       console.log(`${path.basename(file)}: 解码失败 —— ${err.message}`);
@@ -505,7 +513,7 @@ async function main() {
     for (let y = 0; y < REGION_BLOCKS; y += 1) {
       const srcStart = y * REGION_BLOCKS * 4;
       const dstStart = ((oz + y) * width + ox) * 4;
-      result.blocks.copy(canvas, dstStart, srcStart, srcStart + REGION_BLOCKS * 4);
+      canvas.set(result.blocks.subarray(srcStart, srcStart + REGION_BLOCKS * 4), dstStart);
     }
   }
 
