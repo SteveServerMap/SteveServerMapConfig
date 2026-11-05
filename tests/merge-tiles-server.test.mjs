@@ -235,3 +235,49 @@ test('负向用例：400 / 404 / 422 / 500 / 409', async () => {
   const r8 = await api('/api/merge-tiles/apply', json({ dim: 'nether' }));
   assert.equal(r8.status, 422);
 });
+
+test('暂存结果只读端点：manifest / 瓦片 PNG 可读，路径穿越与非法路径被拒', async () => {
+  // 重新分析一次，重建 staging（上个用例清掉了）
+  const res = await analyze([incYellow, incRed]);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.stagingManifestUrl, '/api/merge-staging/overworld/manifest.json');
+
+  // manifest 可读，且是暂存的合并结果（非站点原文）
+  const m = await api('/api/merge-staging/overworld/manifest.json');
+  assert.equal(m.status, 200);
+  assert.equal(m.body.source, 'tile-merge');
+  assert.deepEqual(m.body.worldBlockRange, { xMin: 0, xMax: 192, zMin: 0, zMax: 192 });
+
+  // level-0 瓦片可读，内容与合并结果一致（1_1 = 黄）
+  const t0 = await fetch(`http://127.0.0.1:${ctx.port}/api/merge-staging/overworld/tiles/0/1_1.png`);
+  assert.equal(t0.status, 200);
+  assert.match(t0.headers.get('content-type') || '', /image\/png/);
+  const png = decodePng(Buffer.from(await t0.arrayBuffer()));
+  assert.deepEqual([...png.rgba.subarray(0, 4)], YELLOW);
+
+  // level-1 瓦片同样可读
+  const t1 = await fetch(`http://127.0.0.1:${ctx.port}/api/merge-staging/overworld/tiles/1/0_0.png`);
+  assert.equal(t1.status, 200);
+
+  // 非法相对路径 → 404（穿越、非瓦片命名、目录混入）
+  for (const p of [
+    '/api/merge-staging/overworld/tiles/0/../manifest.json',
+    '/api/merge-staging/overworld/tiles/0/1_1.txt',
+    '/api/merge-staging/overworld/tiles/0/1_1.png/extra',
+    '/api/merge-staging/overworld/tiles/x/1_1.png',
+    '/api/merge-staging/overworld/tiles/0/1_1',
+  ]) {
+    const r = await api(p);
+    assert.equal(r.status, 404, p);
+  }
+
+  // 维度名穿越 → 400；维度名含斜杠 → 404；不存在的维度/文件 → 404；非 GET → 404
+  assert.equal((await api('/api/merge-staging/..%2F..%2Fetc/passwd')).status, 400);
+  assert.equal((await api('/api/merge-staging/a%2Fb/manifest.json')).status, 404);
+  assert.equal((await api('/api/merge-staging/nope/manifest.json')).status, 404);
+  assert.equal((await api('/api/merge-staging/overworld/tiles/0/9_9.png')).status, 404);
+  assert.equal((await api('/api/merge-staging/overworld/manifest.json', { method: 'POST' })).status, 404);
+
+  // .data 下其他文件不在白名单里 → 404
+  assert.equal((await api('/api/merge-staging/overworld/save.log')).status, 404);
+});

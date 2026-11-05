@@ -209,6 +209,19 @@
         <canvas id="mg-tiles-canvas" class="mg-canvas" width="512" height="512"></canvas>
         <div id="mg-tiles-hint" class="mg-canvas-hint">点「分析差异」后这里显示每张 level-0 瓦片的分类色块</div>
       </div>
+      <div id="mg-compare" class="mg-compare" hidden>
+        <div class="mg-compare-head">
+          <span class="mg-compare-label">旧图（站点）</span>
+          <input id="mg-compare-slider" class="mg-compare-slider" type="range" min="0" max="100" value="50" step="1" aria-label="对比滑块：左侧旧图，右侧合并结果">
+          <span class="mg-compare-label">合并结果</span>
+        </div>
+        <div id="mg-compare-stage" class="mg-compare-stage">
+          <canvas id="mg-compare-base" class="mg-compare-canvas" aria-hidden="true"></canvas>
+          <canvas id="mg-compare-merged" class="mg-compare-canvas" aria-hidden="true"></canvas>
+          <div id="mg-compare-divider" class="mg-compare-divider" aria-hidden="true"></div>
+        </div>
+        <p class="mg-compare-hint">拖动滑块对比「旧图」与「合并结果」：分割线左侧是旧图，右侧是合并结果</p>
+      </div>
       <div id="mg-tiles-stats" class="mg-stats">
         <div class="mg-stat"><b>—</b><span>新增瓦片</span></div>
         <div class="mg-stat"><b>—</b><span>变更瓦片</span></div>

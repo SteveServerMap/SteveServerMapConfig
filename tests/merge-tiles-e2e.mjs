@@ -139,7 +139,13 @@ async function main() {
   });
   page.on('Runtime.exceptionThrown', (p) => errors.push('EXC: ' + (p.exceptionDetails?.exception?.description || p.exceptionDetails?.text)));
   page.on('Network.responseReceived', (p) => {
-    if (p.response?.status >= 400) badRequests.push(`${p.response.status} ${p.response.url}`);
+    const status = p.response?.status ?? 0;
+    if (status >= 400) {
+      const url = p.response.url || '';
+      // 瓦片 404 是正常情况（只导出了非全透明瓦片，对比图会请求空白格）
+      if (status === 404 && /(\/tiles\/\d+\/|merge-staging\/[^/]+\/tiles\/)/.test(url)) return;
+      badRequests.push(`${status} ${url}`);
+    }
   });
 
   const setFile = async (inputId, filePaths) => {
@@ -233,6 +239,42 @@ async function main() {
       JSON.stringify(analysis),
     );
 
+    // 对比滑块：旧图 vs 合并结果双画布
+    await page.waitFor(() => window.__merge.compare().layers === true, { timeout: 20000, interval: 200, label: '对比图层加载' });
+    await sleep(700);
+    const cmp = await page.evalFn(() => ({
+      info: window.__merge.compare(),
+      base: { w: document.getElementById('mg-compare-base')?.width, h: document.getElementById('mg-compare-base')?.height },
+      merged: { w: document.getElementById('mg-compare-merged')?.width, h: document.getElementById('mg-compare-merged')?.height },
+      cssW: document.getElementById('mg-compare-base')?.style.width,
+      cssH: document.getElementById('mg-compare-base')?.style.height,
+      sliderValue: document.getElementById('mg-compare-slider')?.value,
+    }));
+    check(
+      '§4 对比滑块：双画布已渲染、默认分割线 50%',
+      cmp.info.layers === true && cmp.info.visible === true &&
+        cmp.base.w >= 192 && cmp.merged.w >= 192 &&
+        cmp.cssW && cmp.cssW !== '' && cmp.cssH && cmp.cssH !== '' &&
+        cmp.info.value === '50' && cmp.info.clip.includes('50%') && cmp.info.divider === '50%',
+      JSON.stringify({ info: cmp.info, base: cmp.base, merged: cmp.merged, cssW: cmp.cssW, cssH: cmp.cssH }),
+    );
+
+    // 拖动滑块 → 裁剪与分割线跟随
+    await page.evalFn(() => {
+      const s = document.getElementById('mg-compare-slider');
+      s.value = '25';
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const moved = await page.evalFn(() => ({
+      clip: document.getElementById('mg-compare-merged')?.style.clipPath,
+      divider: document.getElementById('mg-compare-divider')?.style.left,
+    }));
+    check(
+      '§4 拖动滑块：合并结果只显示右 75%、分割线移到 25%',
+      moved.clip === 'inset(0px 0px 0px 25%)' && moved.divider === '25%',
+      JSON.stringify(moved),
+    );
+
     // 改参数 → stale，保存按钮禁用
     await page.evalFn(() => {
       const el = document.getElementById('mg-diff-thr');
@@ -286,6 +328,10 @@ async function main() {
         !!tile11 && backupDirs.length >= 1 && uploadsLeft === 0,
       `backups=${backupDirs.length}`,
     );
+
+    // 发布后分析结果作废，对比滑块跟着隐藏并释放图层
+    const cmpGone = await page.evalFn(() => window.__merge.compare());
+    check('§5 发布后对比滑块已隐藏、图层已释放', cmpGone.visible === false && cmpGone.layers === false, JSON.stringify(cmpGone));
 
     // 单图模式未受影响
     await page.evalFn(() => document.getElementById('mg-mode-image').click());

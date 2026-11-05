@@ -903,6 +903,7 @@ async function handleApi(req, res, url) {
       ok: true,
       dim,
       staged: true,
+      stagingManifestUrl: `/api/merge-staging/${dim}/manifest.json`,
       fillNew,
       updateChanged,
       counts: result.counts,
@@ -983,6 +984,30 @@ async function handleApi(req, res, url) {
         appliedAt: new Date().toISOString(),
       });
     }, readJsonBody(req));
+  }
+
+  // 只读暴露暂存的合并结果（合并页「旧图 vs 合并结果」对比滑块用）：
+  // /api/merge-staging/<dim>/manifest.json 或 /api/merge-staging/<dim>/tiles/<level>/<x>_<y>.png
+  if (route.startsWith('/api/merge-staging/') && method === 'GET') {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(route);
+    } catch {
+      throw new HttpError(400, '400 Bad Request');
+    }
+    const rest = decoded.slice('/api/merge-staging/'.length);
+    const slash = rest.indexOf('/');
+    const dim = safeDimensionId(slash === -1 ? rest : rest.slice(0, slash));
+    const rel = slash === -1 ? '' : rest.slice(slash + 1);
+    if (!/^(manifest\.json|tiles\/\d+\/-?\d+_-?\d+\.png)$/.test(rel)) {
+      throw new HttpError(404, '暂存结果里没有这个文件');
+    }
+    const stagingDir = path.join(DATA_DIR, 'merge-staging', dim);
+    const resolved = path.resolve(stagingDir, rel);
+    if (!resolved.startsWith(stagingDir + path.sep)) throw new HttpError(403, '403 Forbidden');
+    const ok = await serveFile(res, resolved, { cache: 'no-store' });
+    if (!ok) throw new HttpError(404, `暂存结果不存在：${rel}`);
+    return;
   }
 
   throw new HttpError(404, `未知接口：${method} ${route}`);

@@ -623,6 +623,7 @@ function setTileFiles(files) {
 
 /** 瓦片模式的分析/暂存结果作废 */
 function invalidateTiles() {
+  teardownCompare();
   state.tiles.analysis = null;
   state.tiles.staged = false;
   state.tiles.stale = false;
@@ -674,6 +675,7 @@ async function runAnalyzeTiles() {
       `分析完成：新增 ${res.counts.onlyIncoming} 瓦片 · 变更 ${res.counts.changed} 瓦片 · 仅目标图 ${res.counts.onlyBase} 瓦片（耗时 ${(res.durationMs / 1000).toFixed(1)}s）`,
       'ok',
     );
+    await loadCompareView(dim, res.stagingManifestUrl);
   } catch (err) {
     console.error('[merge] 瓦片分析失败：', err);
     state.ui.setStatus(`分析失败：${err.message}`, 'error');
@@ -681,6 +683,104 @@ async function runAnalyzeTiles() {
   } finally {
     state.ui.setBusy(false);
   }
+}
+
+/* ============================== 瓦片差分：对比滑块 ============================== */
+
+/** @type {null | { baseLayer: any, mergedLayer: any, onResize: () => void }} */
+let compare = null;
+
+function teardownCompare() {
+  const box = $('mg-compare');
+  if (box) box.hidden = true;
+  if (!compare) return;
+  if (compare.onResize) window.removeEventListener('resize', compare.onResize);
+  try { compare.baseLayer?.destroy(); } catch { /* 忽略 */ }
+  try { compare.mergedLayer?.destroy(); } catch { /* 忽略 */ }
+  compare = null;
+}
+
+/**
+ * 分析成功后加载「旧图 vs 合并结果」对比：
+ * 复用站点 assets/js/tiles.js（经 /preview 提供）的 parseManifest + TileLayer，
+ * 两个 canvas 用同一视图状态叠加，滑块裁掉合并结果 canvas 的左侧。
+ */
+async function loadCompareView(dim, stagingManifestUrl) {
+  teardownCompare();
+  const stageEl = $('mg-compare-stage');
+  if (!stageEl || !stagingManifestUrl) return;
+  const dimInfo = state.tiles.dims.find((d) => d.id === dim);
+  const baseUrl = dimInfo?.manifestPath
+    ? `/preview/${dimInfo.manifestPath}`
+    : `/preview/tiles/${dim}/manifest.json`;
+
+  let mod;
+  let baseTileset;
+  let mergedTileset;
+  try {
+    mod = await import('/preview/assets/js/tiles.js');
+    const [baseRes, stagedRes] = await Promise.all([
+      fetch(baseUrl, { cache: 'no-store' }),
+      fetch(stagingManifestUrl, { cache: 'no-store' }),
+    ]);
+    if (!baseRes.ok) throw new Error(`旧图 manifest 读取失败：HTTP ${baseRes.status}`);
+    if (!stagedRes.ok) throw new Error(`合并结果 manifest 读取失败：HTTP ${stagedRes.status}`);
+    baseTileset = mod.parseManifest(await baseRes.json(), { manifestUrl: baseUrl });
+    mergedTileset = mod.parseManifest(await stagedRes.json(), { manifestUrl: stagingManifestUrl });
+    if (!baseTileset || !mergedTileset) throw new Error('manifest 结构不合法，无法对比');
+  } catch (err) {
+    console.warn('[merge] 对比滑块初始化失败：', err);
+    state.ui.toast(`对比图加载失败：${err.message}`, 'error', 5000);
+    return;
+  }
+
+  // 服务端保证暂存结果沿用站点瓦片集的 worldBlockRange，两图逐像素对齐
+  const { imageWidth, imageHeight } = baseTileset;
+  const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+  const baseCanvas = $('mg-compare-base');
+  const mergedCanvas = $('mg-compare-merged');
+  if (!baseCanvas || !mergedCanvas) return;
+  const baseLayer = new mod.TileLayer(baseCanvas, { tileset: baseTileset, dpr });
+  const mergedLayer = new mod.TileLayer(mergedCanvas, { tileset: mergedTileset, dpr });
+  baseLayer.setActive(true);
+  mergedLayer.setActive(true);
+
+  const layout = () => {
+    const cw = stageEl.clientWidth;
+    const ch = stageEl.clientHeight;
+    if (!(cw > 0) || !(ch > 0)) return;
+    const scale = Math.min(cw / imageWidth, ch / imageHeight);
+    const cssW = Math.round(imageWidth * scale);
+    const cssH = Math.round(imageHeight * scale);
+    const tx = (cw - cssW) / 2;
+    const ty = (ch - cssH) / 2;
+    const viewState = { scale, tx, ty, viewWidth: cw, viewHeight: ch };
+    for (const [canvas, layer] of [[baseCanvas, baseLayer], [mergedCanvas, mergedLayer]]) {
+      canvas.style.left = `${tx}px`;
+      canvas.style.top = `${ty}px`;
+      canvas.style.width = `${cssW}px`;
+      canvas.style.height = `${cssH}px`;
+      layer.update(viewState);
+    }
+  };
+
+  const applyDivider = (value) => {
+    const v = Math.max(0, Math.min(100, Number(value) || 0));
+    mergedCanvas.style.clipPath = `inset(0 0 0 ${v}%)`;
+    const divider = $('mg-compare-divider');
+    if (divider) divider.style.left = `${v}%`;
+  };
+
+  const onResize = () => layout();
+  window.addEventListener('resize', onResize);
+  const slider = $('mg-compare-slider');
+  if (slider) slider.addEventListener('input', () => applyDivider(slider.value));
+
+  compare = { baseLayer, mergedLayer, onResize };
+  const box = $('mg-compare');
+  if (box) box.hidden = false;
+  applyDivider(slider ? slider.value : 50);
+  layout();
 }
 
 async function saveTilesToSite() {
@@ -833,6 +933,13 @@ window.__merge = {
     analysis: state.tiles.analysis
       ? { counts: state.tiles.analysis.counts, blocksArea: state.tiles.analysis.blocksArea }
       : null,
+  }),
+  compare: () => ({
+    visible: !($('mg-compare')?.hidden ?? true),
+    layers: !!compare,
+    value: $('mg-compare-slider')?.value ?? null,
+    clip: $('mg-compare-merged')?.style.clipPath || '',
+    divider: $('mg-compare-divider')?.style.left || '',
   }),
   setTileFiles: (files) => setTileFiles(files),
   setParams: (params) => {
