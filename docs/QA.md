@@ -230,7 +230,43 @@ node tests/e2e.mjs
 
 | 时间（本地） | 环境 | 结果 | 耗时 |
 | --- | --- | --- | --- |
+| 2026-11-06 05:23 | Node v24.22.1 · Edge 155.0.4283.62 (headless) · Windows | **17 通过 / 0 失败 / 0 跳过 / 0 警告**（退出码 0）；单测 108 + 11 全过；merge-e2e 10/10、merge-tiles-e2e 17/17 | 21.5 s |
 | 2026-11-05 04:32 | Node v24.18.0 · Edge 155 (headless) · Windows | **16 通过 / 0 失败 / 0 跳过 / 0 警告**（退出码 0） | 18.8 s |
+
+> 本轮是「移除校准 UI + 修复两个 merge e2e」提交（`54e0fcd` / `4499257`）后的第一轮：§7 重新编号为 7 条，
+> 检查项 17 项（新增 `c5d-drag` 拖动移动开关，`c4-calibration` 已随校准功能移除）；
+> 站点主世界已是瓦片底图（15 个路径点 / 4 个分组），`c0-visible` 走瓦片分支。
+> 配套：`npm test` 108/108、`node --test tests/png-to-tiles.test.mjs tests/tile-merge.test.mjs tests/merge-tiles-server.test.mjs` 11/11、
+> `node tests/merge-e2e.mjs` 10/10、`node tests/merge-tiles-e2e.mjs` 17/17。
+
+逐项（与运行时输出一致）：
+
+```
+✓ x3-schema-selftest      站点配置 0 错误；坏配置被拒 3 条（如 $.dimensions[0]: 缺少必填字段 "name"）
+✓ c1-health               200 · version=1.0.0 · siteDir=临时副本 · dataDir=--data 指定的临时目录
+✓ c2-page                 重新导航后 411 ms 内完成首屏；树渲染 104 ms；[data-waypoint-id] 15 个；
+                          瓦片底图 4096×5120（manifest）；console error / 异常 / HTTP≥400：0 条
+✓ c0-visible              瓦片底图：opacity=1、is-loaded ✓、592×740px；level=3、canvas 512×640、dpr=1、已贴 6/6；
+                          mean=21.9 / litRatio=0.186（阈值 8 / 0.05）；#canvas-info="主世界 · 瓦片 tile…"
+✓ c0b-enhance             data-enhance 0 → 1 → 0；aria-pressed false→true；filter 变化 ✓；localStorage=1
+✓ c3-tree-count           [data-waypoint-id] 15 个 = 站点 config.json 主世界 15 个；维度 3/3、分组 4/4
+✓ c0c-tiles               放大 8× 层级 3→0、canvasW 512→4096；表单/摘要/单图互切/导出 tiles 全部正确
+✓ x1-undo-redo            改名 → Ctrl+Z 复原 → Ctrl+Shift+Z 再改回（每步由草稿实测）
+✓ c5a-new-waypoint        「在图上取点」→ place → 画布点击；新点 wp-16 X=-29 Z=-1068（点击处 -28.977 / -1068.026）
+✓ c5b-save-verify         主世界 15 → 16 个点；JSON.parse ✓；schema ✓；其它维度（nether/the_end）点数未变
+✓ x2-backup               .backups/config.json.bak-20261106-052320…（5544 字节）：JSON.parse ✓、保存前 15 个点
+✓ c5c-place               新建后 select/placeFor=null → place → 落位误差 0.726 方块 ≤1.5 → 回 select；
+                          点空白不移动已选点 ✓、切换选中自动取消放置 ✓（撤销 2 次复原）
+✓ c5d-drag                默认不可拖（坐标未变）· 开启后可拖 {6,-11}→{218,70} · Alt 临时可拖
+✓ c6-save-blocked         维度 id 清空 → 校验器报 1 个错误 → 保存被阻止（5723 字节未变）→ 界面提示「有 1 个错误，未保存」
+✓ c7-preview              iframe 标记 17 个 = 草稿 17 个（站点已保存 16 个）
+✓ c8-path-traversal       4 种越界写法全部 4xx；站点目录外没有 evil.png
+✓ x4-real-site-untouched  真实站点 config.json sha256 872307ead905… 不变、15 个顶层条目体积/mtime 全部一致
+```
+
+`tests/artifacts/` 里当前只保留 `last-run.json`（本轮全部通过，因此没有失败截图）。
+
+### 上一轮（2026-11-05 04:32）
 
 > 站点 `config.json` 已被用户改成 **主世界 5 点 / 下界 0 / 末地 0**、画幅也重新校准过；
 > 本轮的期望值全部从站点副本动态读取，所以数字与上一轮不同属于正常。
@@ -259,8 +295,6 @@ node tests/e2e.mjs
 ✓ c8-path-traversal       4 种越界写法全部 400；站点目录外没有 evil.png
 ✓ x4-real-site-untouched  真实站点 config.json sha256 34b99e3430ff… 不变、14 个顶层条目体积/mtime 全部一致
 ```
-
-`tests/artifacts/` 里当前只保留 `last-run.json`（本轮全部通过，因此没有失败截图）。
 
 历史（供对照）：
 
