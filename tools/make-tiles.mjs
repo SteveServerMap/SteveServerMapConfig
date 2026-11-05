@@ -277,7 +277,7 @@ async function main() {
   console.log(`世界范围：X ${manifest.worldBlockRange.xMin}..${manifest.worldBlockRange.xMax} · Z ${manifest.worldBlockRange.zMin}..${manifest.worldBlockRange.zMax}`);
 }
 
-const VIEWER_HTML = `<!doctype html>
+export const VIEWER_HTML = `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
@@ -397,8 +397,10 @@ resize();
 </html>
 `;
 
-main().catch((err) => {
-  console.error('生成瓦片失败：', err && err.stack ? err.stack : err);
-  process.exit(1);
-});
+if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('make-tiles.mjs')) {
+  main().catch((err) => {
+    console.error('生成瓦片失败：', err && err.stack ? err.stack : err);
+    process.exit(1);
+  });
+}
 
