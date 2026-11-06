@@ -995,7 +995,7 @@ async function canvasPointAt(page, fx, fy) {
     if (!(logicalW > 0) || !(logicalH > 0)) {
       return { error: `底图逻辑尺寸无效（${isTile ? '瓦片' : '单图'}：${logicalW}×${logicalH}）` };
     }
-    // 瓦片模式（视口渲染）：<canvas> 的 CSS 盒 = 视口，真正的「整幅图片盒」在 #canvas-stage 上，
+    // 瓦片模式（外扩窗口渲染）：<canvas> 的 CSS 盒 = 视口外扩 25% 的窗口，真正的「整幅图片盒」在 #canvas-stage 上，
     // 换算必须用它（单图模式下 img 的矩形与 stage 一致，两种模式统一读 stage）
     const stage = isTile ? document.querySelector('#canvas-stage') : null;
     const ir = (stage || target).getBoundingClientRect();
@@ -1548,7 +1548,7 @@ async function checkCanvasVisible(ctx) {
     const isTile = Boolean(stats && stats.active && tiles && getComputedStyle(tiles).display !== 'none');
     const target = isTile ? tiles : img;
     if (!target) return { error: '缺少底图元素（#canvas-image / #canvas-tiles）' };
-    // 瓦片模式（视口渲染）下 canvas 的盒子 = 整个视口，截图区域必须取「地图盒」（#canvas-stage），
+    // 瓦片模式（外扩窗口渲染）下 canvas 的盒子盖住视口外扩一圈，截图区域必须取「地图盒」（#canvas-stage），
     // 否则上下留白区域会把亮像素占比稀释到阈值以下
     const stage = isTile ? document.querySelector('#canvas-stage') : null;
     const box = stage || target;
@@ -1604,7 +1604,7 @@ async function checkCanvasVisible(ctx) {
  * 瓦片底图回归：
  *   ① 维度表单里有「底图类型 = 瓦片」+ manifest 输入，摘要有世界范围；
  *   ② #canvas-tiles 可见、#canvas-image 隐藏，TileLayer 真的贴出了瓦片；
- *   ③ 放大后自动切到更细的层级（level 变细 / canvas 位图变大）；
+ *   ③ 放大后自动切到更细的层级（level 变细；位图恒为 1.5×视口×dpr，不随缩放变化）；
  *   ④ 切到单图维度再切回来，两种底图能正确互切（不重影、不残留）；
  *   ⑤ 导出 JSON 仍带 tiles 字段（工具不会把瓦片维度退化成单图）。
  */
@@ -1663,7 +1663,7 @@ async function checkTilesMode(ctx) {
   assert(facts.tileVisible, '#canvas-tiles 不可见（display 或尺寸不对）');
   assert(facts.imageDisplay === 'none', `瓦片模式下 #canvas-image display 实际 ${facts.imageDisplay} vs 期望 none`);
 
-  // 放大 → 层级应该更细（level 更小 / canvas 位图更大）
+  // 放大 → 层级应该更细（level 更小）；位图恒为 1.5×视口×dpr（OR 条件兼容旧行为）
   const fitStats = facts.stats;
   await page.evalFn(() => window.__tool?.canvas?.zoomBy?.(8));
   await page.settle(350);

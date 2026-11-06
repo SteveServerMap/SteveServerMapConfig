@@ -8,7 +8,7 @@
 - CDP 库：复用 `D:\Project\Github\SteveServerMap.github.io\tests\headless.mjs`（用 `file://` 绝对路径 import，不复制粘贴）
 - 运行产物：`tests/artifacts/`（`.gitignore` 掉除 `.gitignore` 以外的一切）
 
-当前状态：**站点侧全绿（单测 69/69、static-checks 30/30、smoke 39/39，2026-11-06 测距守卫并入 smoke 后）**；本仓库 e2e
+当前状态：**站点侧全绿（单测 71/71、static-checks 30/30、smoke 39/39，2026-11-07 恒外扩窗口 + 平移冻结落地后，位图恒 = 1.5×视口×dpr）**；本仓库 e2e
 `node tests/e2e.mjs` → **4 通过 / 1 失败 / 12 跳过**，唯一失败 `c2-page`（§7.2）——
 站点数据缺口：`tiles/overworld/tiles/6/1_0.png` 磁盘缺失但 manifest 声称存在
 （2026-11-06 14:10 瓦片重生成遗留），预览页请求 404 被算作 console error。
@@ -42,6 +42,9 @@
   与 `e2e.mjs` 相应适配——`canvasPointAt` / `checkCanvasVisible` 的截图与坐标换算改读 `#canvas-stage`
   的「整幅地图盒」（瓦片模式下 `<canvas>` 盒子 = 视口，不再是地图盒）；`c0c-tiles` 断言改为
   「位图恒为视口 × dpr，不再随层级放大」。
+- 更新（2026-11-07，恒外扩窗口）：站点 `tiles.js` 改为「外扩窗口渲染 + 平移冻结」——静止与拖拽同一条
+  路径，位图 = 1.5×视口×dpr（不再有进出交互的窗口切换），进出交互零重画零变化；本仓库 `e2e.mjs`
+  相应断言「位图恒为 1.5×视口×dpr」。
 
 ---
 
