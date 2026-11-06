@@ -8,7 +8,7 @@
 - CDP 库：复用 `D:\Project\Github\SteveServerMap.github.io\tests\headless.mjs`（用 `file://` 绝对路径 import，不复制粘贴）
 - 运行产物：`tests/artifacts/`（`.gitignore` 掉除 `.gitignore` 以外的一切）
 
-当前状态：**站点侧全绿（单测 69/69、static-checks 30/30、smoke 36/36）**；本仓库 e2e
+当前状态：**站点侧全绿（单测 74/74、static-checks 30/30、smoke 39/39，2026-11-06 拖动抖动修复后）**；本仓库 e2e
 `node tests/e2e.mjs` → **4 通过 / 1 失败 / 12 跳过**，唯一失败 `c2-page`（§7.2）——
 站点数据缺口：`tiles/overworld/tiles/6/1_0.png` 磁盘缺失但 manifest 声称存在
 （2026-11-06 14:10 瓦片重生成遗留），预览页请求 404 被算作 console error。
