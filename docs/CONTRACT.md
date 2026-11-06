@@ -166,7 +166,8 @@ export class EditorCanvas {
 **底图二选一（2026-11-06 新增瓦片）**
 - 单图：`<img id="canvas-image">`（`.canvas-image` 靠 `is-loaded` 淡入）；
 - 瓦片：`<canvas id="canvas-tiles" class="canvas-image canvas-tiles">`（由 canvas.js 创建的子图层，
-  与 `#canvas-image` 共用 stage 的 transform 与逻辑尺寸；同一时刻只显示一个，另一个 `display:none`）；
+  绝对定位在 stage 坐标系里；**CSS 盒与位图尺寸都由 TileLayer 按视口设置（视口渲染）**，
+  与 `#canvas-image` 共用 stage 的 transform；同一时刻只显示一个，另一个 `display:none`）；
 - 瓦片层的层级选择 / 视口裁剪 / LRU 缓存全部复用站点 `assets/js/tiles.js`（`/preview/` 静态导入）：
   1 瓦片像素 ≈ 1 **设备**像素（`levelForScale(scale, dpr)`），放大时关插值、缩小时平滑；
 - 单图缩放插值：`scale >= 1` → `image-rendering: pixelated`（锐利），`< 1` → `auto`（平滑）；

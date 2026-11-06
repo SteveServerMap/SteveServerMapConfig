@@ -860,11 +860,7 @@ export class EditorCanvas {
       this.imageEl.style.maxWidth = 'none';
       this.imageEl.style.maxHeight = 'none';
     }
-    // 瓦片 canvas 与 <img> 共用同一套逻辑尺寸（同一个 stage transform），切模式时无需重排
-    if (this._tileCanvas) {
-      this._tileCanvas.style.width = `${w}px`;
-      this._tileCanvas.style.height = `${h}px`;
-    }
+    // 瓦片 canvas 的 CSS 盒由 TileLayer 按视口摆放（视口渲染），这里不碰它的尺寸
     // 之前因为不知道图片尺寸而没建成的投影，现在可以补建
     if (this._pendingProjection && !this._projection) {
       this._projection = this._coerceProjection(this._pendingProjection);

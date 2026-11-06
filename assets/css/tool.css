@@ -2308,6 +2308,9 @@ body.preview-open {
 #canvas-image,
 #canvas-tiles {
   background: #050706;
+}
+
+#canvas-image {
   box-shadow:
     0 0 0 1px rgba(90, 210, 111, 0.3),
     0 18px 60px rgba(0, 0, 0, 0.55);
@@ -2319,8 +2322,12 @@ body[data-enhance="1"] #canvas-tiles {
   filter: brightness(2.8) saturate(1.15) contrast(1.02);
 }
 
-/* 瓦片底图：<canvas> 与 <img> 共用 .canvas-image 的尺寸/显隐语义（canvas.js 负责 display 切换） */
+/* 瓦片底图：视口渲染 —— CSS 盒（left/top/width/height）由 TileLayer 按视口内联设置，
+   这里只保证它绝对定位在 stage 坐标系里，其余尺寸/显隐语义与 .canvas-image 一致 */
 .canvas-tiles {
+  position: absolute;
+  left: 0;
+  top: 0;
   max-width: none;
   max-height: none;
   user-select: none;

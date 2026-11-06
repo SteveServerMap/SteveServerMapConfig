@@ -8,8 +8,11 @@
 - CDP 库：复用 `D:\Project\Github\SteveServerMap.github.io\tests\headless.mjs`（用 `file://` 绝对路径 import，不复制粘贴）
 - 运行产物：`tests/artifacts/`（`.gitignore` 掉除 `.gitignore` 以外的一切）
 
-当前状态：**17 项检查全部通过，退出码 0**（§7 的 7 条 + 新增路径点拆成 4 条 + 10 项加固/回归，
-其中含「基底图真的被画出来」的可见性回归与 2026-11-06 新增的瓦片底图回归）。
+当前状态：**站点侧全绿（单测 69/69、static-checks 30/30、smoke 36/36）**；本仓库 e2e
+`node tests/e2e.mjs` → **4 通过 / 1 失败 / 12 跳过**，唯一失败 `c2-page`（§7.2）——
+站点数据缺口：`tiles/overworld/tiles/6/1_0.png` 磁盘缺失但 manifest 声称存在
+（2026-11-06 14:10 瓦片重生成遗留），预览页请求 404 被算作 console error。
+补上该瓦片（或修 manifest）后恢复全绿；其余检查（含 `c0c-tiles` 视口渲染回归）全部通过。
 
 ## 瓦片底图 + DPR + 缩放插值（2026-11-06）
 
@@ -31,10 +34,14 @@
   `/preview/tiles/tiles/**/*.png` 的 404（未导出瓦片属正常），manifest 的 404 仍算错误；
   「基底图可见性」检查支持两种底图（canvas 位图 / img）。
 - **新增检查 `c0c-tiles`**：表单值 `tiles` + manifest、摘要含世界范围、`#canvas-tiles` 可见且
-  `#canvas-image` 隐藏、瓦片真的贴出、放大 8× 后层级由 3 → 0（canvas 512 → 4096）、
-  切到单图维度再切回瓦片维度正确互切、导出 JSON 仍保留 `tiles`。
+  `#canvas-image` 隐藏、瓦片真的贴出、放大 8× 后层级由 3 → 0（视口渲染下位图恒为视口 × dpr，
+  不再随层级放大）、切到单图维度再切回瓦片维度正确互切、导出 JSON 仍保留 `tiles`。
 - **结果**：`node tests/e2e.mjs` → **18 通过 / 0 失败 / 0 跳过**（≈26 s，实测 25.8 s）。
   实测 `c0-visible`：瓦片 level=3、canvas 512×640、dpr=1（无头）、已贴 6/6 张、像素 mean=21.8 / litRatio=0.185。
+- 更新（2026-11-06 晚，视口渲染）：站点 `tiles.js` 改视口渲染后（backing = 视口 × dpr），本仓库 `canvas.js`
+  与 `e2e.mjs` 相应适配——`canvasPointAt` / `checkCanvasVisible` 的截图与坐标换算改读 `#canvas-stage`
+  的「整幅地图盒」（瓦片模式下 `<canvas>` 盒子 = 视口，不再是地图盒）；`c0c-tiles` 断言改为
+  「位图恒为视口 × dpr，不再随层级放大」。
 
 ---
 
@@ -105,7 +112,7 @@ node tests/e2e.mjs
 | `c1-health` | §7.1 | `GET /api/health` → 200 且 `ok:true`、`version`/`uptime` 合法；`siteDir`/`dataDir` 指向临时目录 |
 | `c2-page` | §7.2 | **重新导航**后 3 秒内渲染出配置树；console error / 未捕获异常 / HTTP≥400 共 0 条；基底图载入成功 |
 | `c0-visible` | 扩展（可见性回归） | 基底图**真的被画出来**（单图看 `#canvas-image`，瓦片看 `#canvas-tiles`）：computed `opacity===1`、class 含 `is-loaded`、尺寸 >50×50、截图亮度 `mean>8` 且 `litRatio>0.05`、`#canvas-info` 含 `W×H`；瓦片还断言层级/位图尺寸/dpr/已贴张数，且 `#canvas-image` 已隐藏 |
-| `c0c-tiles` | 扩展（瓦片底图） | 维度表单「底图类型 = 瓦片」+ manifest、摘要含世界范围；`#canvas-tiles` 可见、瓦片真的贴出；放大 8× 层级由粗变细（3→0、canvas 512→4096）；切单图维度再切回瓦片维度正确互切；导出 JSON 仍保留 `tiles` |
+| `c0c-tiles` | 扩展（瓦片底图） | 维度表单「底图类型 = 瓦片」+ manifest、摘要含世界范围；`#canvas-tiles` 可见、瓦片真的贴出；放大 8× 层级由粗变细（3→0，视口渲染下位图恒为视口尺寸）；切单图维度再切回瓦片维度正确互切；导出 JSON 仍保留 `tiles` |
 | `c0b-enhance` | 扩展 | 点一次 `#btn-enhance` 只翻转一次（`body[data-enhance]` / `aria-pressed` / `#canvas-image` filter / `localStorage['ssm.enhance.v1']` 同步、再点回原状、不重复绑定） |
 | `c3-tree-count` | §7.3 | `#tree` 里 `[data-waypoint-id]` 数量 = 站点 `config.json` 主世界路径点数（**从副本动态读取**，站点配置由用户随时改） |
 | `x1-undo-redo` | 扩展 | 改路径点名称 → `Ctrl+Z` 复原 → `Ctrl+Shift+Z` 再改回（每步读草稿实测） |

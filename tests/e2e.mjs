@@ -995,7 +995,10 @@ async function canvasPointAt(page, fx, fy) {
     if (!(logicalW > 0) || !(logicalH > 0)) {
       return { error: `底图逻辑尺寸无效（${isTile ? '瓦片' : '单图'}：${logicalW}×${logicalH}）` };
     }
-    const ir = target.getBoundingClientRect();
+    // 瓦片模式（视口渲染）：<canvas> 的 CSS 盒 = 视口，真正的「整幅图片盒」在 #canvas-stage 上，
+    // 换算必须用它（单图模式下 img 的矩形与 stage 一致，两种模式统一读 stage）
+    const stage = isTile ? document.querySelector('#canvas-stage') : null;
+    const ir = (stage || target).getBoundingClientRect();
     const rr = root.getBoundingClientRect();
     const left = Math.max(ir.left, rr.left, 0);
     const right = Math.min(ir.right, rr.right, window.innerWidth);
@@ -1545,7 +1548,11 @@ async function checkCanvasVisible(ctx) {
     const isTile = Boolean(stats && stats.active && tiles && getComputedStyle(tiles).display !== 'none');
     const target = isTile ? tiles : img;
     if (!target) return { error: '缺少底图元素（#canvas-image / #canvas-tiles）' };
-    const rect = target.getBoundingClientRect();
+    // 瓦片模式（视口渲染）下 canvas 的盒子 = 整个视口，截图区域必须取「地图盒」（#canvas-stage），
+    // 否则上下留白区域会把亮像素占比稀释到阈值以下
+    const stage = isTile ? document.querySelector('#canvas-stage') : null;
+    const box = stage || target;
+    const rect = box.getBoundingClientRect();
     const left = Math.max(0, rect.left);
     const top = Math.max(0, rect.top);
     const right = Math.min(window.innerWidth, rect.right);
