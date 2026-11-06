@@ -9,10 +9,26 @@
 - 运行产物：`tests/artifacts/`（`.gitignore` 掉除 `.gitignore` 以外的一切）
 
 当前状态：**站点侧全绿（单测 71/71、static-checks 30/30、smoke 39/39，2026-11-07 恒外扩窗口 + 平移冻结落地后，位图恒 = 1.5×视口×dpr）**；本仓库 e2e
-`node tests/e2e.mjs` → **4 通过 / 1 失败 / 12 跳过**，唯一失败 `c2-page`（§7.2）——
-站点数据缺口：`tiles/overworld/tiles/6/1_0.png` 磁盘缺失但 manifest 声称存在
-（2026-11-06 14:10 瓦片重生成遗留），预览页请求 404 被算作 console error。
-补上该瓦片（或修 manifest）后恢复全绿；其余检查（含 `c0c-tiles` 视口渲染回归）全部通过。
+`node tests/e2e.mjs` → **17 通过 / 0 失败 / 0 跳过**（2026-11-07 修复两处测试 bug 后首次全绿，见下）。
+
+## 2026-11-07 e2e 全绿：两处测试 bug 修复
+
+之前「4 通过 / 1 失败 / 12 跳过」（c2-page 因瓦片 404 失败，拖挂后面全部检查）追查后是两处**测试自身**的 bug，工具行为是对的：
+
+1. **瓦片 404 放行正则漏了维度段**：`createDiagnostics` 的 ignore 正则是
+   `/preview/tiles/tiles/<level>/<x>_<y>.png`，而真实 URL 布局是
+   `/preview/tiles/<维度>/tiles/<level>/<x>_<y>.png`（如 `overworld`），从来没兜住过。
+   未导出瓦片的 404 是设计内正常情况（未探索区域不导出），已改为与站点 smoke 一致的模式
+   （兼容带/不带维度段，且要求 404 状态码）。`tiles/overworld/tiles/6/1_0.png` 磁盘缺失
+   无需重新生成——它就该被放行。
+2. **点击期望坐标误用旧 calibration**：c5a/c5c 用 `dim.calibration`（站点 config.json 里
+   单图时代的旧画幅，世界原点在图片中心）反推点击处世界坐标；瓦片维度的世界范围来自
+   manifest 的 `worldBlockRange`（主世界 origin = (-39424, -6656)），整体偏移 16000 方块。
+   工具落点用的是 manifest 投影（实测 X=-15906 与点击处完全一致），是期望算错了。
+   现改为瓦片模式取 `tool.tileMeta().bounds`、单图模式才用 `dim.calibration`。
+
+修复后 `17 通过 / 0 失败 / 0 跳过`（≈22.2 s），`c0c-tiles` 首次在瓦片模式下真正跑通：
+level 6→3（放大 8×）、canvas 位图恒 1167×1167、单图互切 / 导出 tiles 全部正确。
 
 ## 瓦片底图 + DPR + 缩放插值（2026-11-06）
 
@@ -31,7 +47,8 @@
   `canvas.setTileset()`；投影走 manifest 的 `worldBlockRange`；manifest 失败自动回退单图并 toast。
   维度表单新增「底图类型 = 单图/瓦片」「瓦片清单」与瓦片摘要（世界范围 / 尺寸 / 层级）。
 - **e2e 基建**：临时站点副本改为连 `tiles/` 目录一起复制；`createDiagnostics` 放行
-  `/preview/tiles/tiles/**/*.png` 的 404（未导出瓦片属正常），manifest 的 404 仍算错误；
+  `/preview/tiles/<维度>/tiles/<level>/<x>_<y>.png` 的 404（未导出瓦片属正常，兼容无维度段布局），
+  manifest 的 404 仍算错误；
   「基底图可见性」检查支持两种底图（canvas 位图 / img）。
 - **新增检查 `c0c-tiles`**：表单值 `tiles` + manifest、摘要含世界范围、`#canvas-tiles` 可见且
   `#canvas-image` 隐藏、瓦片真的贴出、放大 8× 后层级由 3 → 0（视口渲染下位图恒为视口 × dpr，

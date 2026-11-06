@@ -1043,6 +1043,25 @@ function worldFromPixel(cal, imageSize, px, py) {
   return { x: xMin + (num(px) / num(imageSize.width)) * spanX, z: zMin + t * spanZ };
 }
 
+/**
+ * 「点击处世界坐标」的期望换算画幅：
+ * 瓦片维度以 manifest 的 worldBlockRange（tool.tileMeta().bounds）为准——config 里的 calibration
+ * 可能是单图时代的旧值（与 manifest 整体偏移），工具放置落点走的是 manifest 投影。
+ * 单图维度才用 dim.calibration。
+ */
+async function worldCalForExpectation(page, dim) {
+  const bounds = await page.evalFn(() => {
+    const t = window.__tool && typeof window.__tool.tileMeta === 'function' ? window.__tool.tileMeta() : null;
+    if (!t || t.error || !t.bounds) return null;
+    const b = t.bounds;
+    return { xMin: Number(b.xMin), xMax: Number(b.xMax), zMin: Number(b.zMin), zMax: Number(b.zMax) };
+  });
+  if (bounds && [bounds.xMin, bounds.xMax, bounds.zMin, bounds.zMax].every(Number.isFinite)) {
+    return { ...bounds, flipZ: false };
+  }
+  return dim.calibration || {};
+}
+
 /* ------------------------------ 草稿 / 站点配置读取 ------------------------------ */
 
 async function readLiveDraft(ctx) {
@@ -1979,12 +1998,12 @@ async function checkNewWaypoint(ctx) {
 
   // 画布交互（新语义）：新建后**不会**自动进入 place；
   // 先点顶栏「在图上取点」(#btn-pick-position) → place 模式 → 点地图落位。
-  const cal = dim.calibration || {};
+  const target = await canvasPointAt(page, 0.42, 0.38);
+  const cal = await worldCalForExpectation(page, dim);
   assert(
     Number.isFinite(num(cal.xMin)) && Number.isFinite(num(cal.zMin)),
     `当前维度的画幅不可用（xMin=${JSON.stringify(cal.xMin)} zMin=${JSON.stringify(cal.zMin)}），无法换算点击位置`,
   );
-  const target = await canvasPointAt(page, 0.42, 0.38);
   const wantWorld = worldFromPixel(cal, target.imageSize || imageSize, target.px, target.py);
 
   const readWp = async () => {
@@ -2293,8 +2312,8 @@ async function checkPlaceMode(ctx) {
   );
   assert(armed.badgeVisible === true, '放置模式下 #mode-badge 实际隐藏 vs 期望可见（应提示「放置「…」：点击地图设置坐标」）');
 
-  const cal = dim.calibration || {};
   const target = await canvasPointAt(page, 0.72, 0.28);
+  const cal = await worldCalForExpectation(page, dim);
   const want = worldFromPixel(cal, target.imageSize, target.px, target.py);
   await page.click(target.cx, target.cy);
   await page.settle(260);
@@ -3241,12 +3260,15 @@ async function preflight(ctx) {
   const page = await Page.open(cdp, { url: 'about:blank' });
   ctx.page = page;
   await page.setViewport(VIEWPORT);
-  // 瓦片缺失（未探索区域不导出瓦片）是正常情况：/preview/tiles/tiles/<level>/<x>_<y>.png 的 404 一律放行。
+  // 瓦片缺失（未探索区域不导出瓦片）是正常情况：
+  // /preview/tiles/<维度>/tiles/<level>/<x>_<y>.png 的 404 一律放行（兼容无维度段的旧布局）。
   // manifest 本身的 404 仍然算错误 —— 那说明路径填错了或副本没带 tiles/。
   ctx.diagnostics = createDiagnostics(page, {
     ignore: (error) => {
       const where = String(error?.where || '');
-      return /\/preview\/tiles\/tiles\/[^/]+\/[^/]+\.png(?:[?#].*)?$/.test(where);
+      const text = String(error?.text || '');
+      return /404/.test(text)
+        && /\/preview\/tiles\/(?:[^/]+\/)?tiles\/\d+\/\d+_\d+\.png(?:[?#].*)?$/i.test(where);
     },
   });
   // window.confirm（「读取站点配置」「删除路径点」都会弹）在无头模式下会卡住页面，统一自动接受
