@@ -538,7 +538,9 @@ test('normalizeDraft：字符串数字 / 缺分组 / 重复 id / 未知字段都
   assert.ok(warnings.some((warning) => warning.includes('维度 id 重复')));
   assert.ok(warnings.some((warning) => warning.includes('分组 id 重复')));
   assert.ok(warnings.some((warning) => warning.includes('路径点 id 重复')));
-  assert.ok(warnings.some((warning) => warning.includes('不存在的分组')));
+  // 分组缺失/不存在时静默归入「未分组」（2026-11-13 起不再提示）
+  assert.equal(waypoints[0].group, 'default');
+  assert.equal(warnings.some((warning) => warning.includes('不存在的分组')), false);
   assert.ok(warnings.some((warning) => warning.includes('defaultDimension')));
   assert.ok(warnings.some((warning) => warning.includes('labelMode')));
 });
@@ -603,7 +605,7 @@ test('validateDraft：合法草稿没有任何 error / warning', () => {
   assert.equal(result.errors.every((issue) => issue.level === 'error'), true);
 });
 
-test('validateDraft：缺 id / 重复 id / 非数字坐标 / 分组不存在 → error 或 warning，path 正确', () => {
+test('validateDraft：缺 id / 重复 id / 非数字坐标 → error，path 正确（不存在的分组静默回落）', () => {
   const draft = makeValidDraft();
   const dimension = draft.dimensions[0];
   dimension.waypoints = [
@@ -629,7 +631,8 @@ test('validateDraft：缺 id / 重复 id / 非数字坐标 / 分组不存在 →
   assert.ok(hasIssue(errors, 'dimensions[0].waypoints[2].id', 'id 重复'));
   assert.ok(hasIssue(errors, 'dimensions[0].waypoints[1].x', 'X 坐标'));
   assert.ok(hasIssue(errors, 'dimensions[0].waypoints[1].z', 'Z 坐标'));
-  assert.ok(hasIssue(warnings, 'dimensions[0].waypoints[2].group', '不存在'));
+  // 2026-11-13 起：分组不存在静默回落到「未分组」，不再产生 warning
+  assert.equal(warnings.some((issue) => issue.path === 'dimensions[0].waypoints[2].group'), false);
   assert.equal(errors.every((issue) => issue.level === 'error'), true);
   assert.equal(warnings.every((issue) => issue.level === 'warning'), true);
 });

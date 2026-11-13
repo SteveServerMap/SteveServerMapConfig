@@ -613,9 +613,6 @@ function normalizeWaypoints(rawWaypoints, groups, groupIds, warnings, dimensionN
 
     let group = str(rawWaypoint.group);
     if (!group || !groupIds.has(group)) {
-      if (group) {
-        warnings.push(`路径点「${name}」引用了不存在的分组「${group}」，已归入「未分组」`);
-      }
       group = DEFAULT_GROUP.id;
       if (!groupIds.has(group)) {
         groups.push(makeDefaultGroup());
@@ -974,14 +971,6 @@ export function validateDraft(draft, ctx) {
           num(waypoint.y) === null
         ) {
           warn(`${waypointPath}.y`, 'Y 坐标不是数字，站点会忽略它');
-        }
-        const group = str(waypoint.group);
-        if (!group) {
-          if (!groupIds.has(DEFAULT_GROUP.id)) {
-            warn(`${waypointPath}.group`, '未指定分组，站点会自动归入「未分组」');
-          }
-        } else if (!groupIds.has(group)) {
-          warn(`${waypointPath}.group`, `分组「${group}」不存在，将回落到「未分组」`);
         }
       });
     });
